@@ -42,7 +42,7 @@ AA_LEVELS = [0x0F, 0x1F, 0x2F, 0x3F, 0x4F, 0x5F, 0x6F, 0x7F,
 # Sticker pixel size is independent of device resolution, but the device
 # code is stored in the header metadata as APPLY_EQUIPMENT.
 DEVICES = {
-    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
+    "N6":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
     "A5X": {"name": "A5X",                      "screen": (1404, 1872)},
     "A6X": {"name": "A6X",                      "screen": (1404, 1872)},
 }
@@ -145,18 +145,21 @@ def generate_file_id() -> str:
     timestamp = time.strftime("%Y%m%d%H%M%S")
     # Add milliseconds and random suffix
     ms = f"{int(time.time() * 1000) % 1000:03d}"
-    suffix = uuid.uuid4().hex[:13]
+    import random as _rng
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    r = _rng.Random(uuid.uuid4().int)
+    suffix = "".join(r.choice(alphabet) for _ in range(15))
     return f"F{timestamp}{ms}{suffix}"
 
 
-def build_sticker(pixels: list[int], width: int, height: int, device: str = "N5") -> bytes:
+def build_sticker(pixels: list[int], width: int, height: int, device: str = "N6") -> bytes:
     """Build a complete .sticker file from pixel data.
 
     Args:
         pixels: List of Supernote color codes.
         width: Sticker width in pixels.
         height: Sticker height in pixels.
-        device: Device code (N5=Manta/Nomad, A5X, A6X).
+        device: Device code (N6=Manta/Nomad, A5X, A6X).
     """
     # --- Section 1: File header ---
     magic = b"stck"
@@ -210,7 +213,7 @@ def build_sticker(pixels: list[int], width: int, height: int, device: str = "N5"
 
 
 def create_snstk(output_path: str, png_paths: list[str], size: int = DEFAULT_STICKER_SIZE,
-                 device: str = "N5") -> None:
+                 device: str = "N6") -> None:
     """Create a .snstk sticker pack from PNG files.
 
     Args:
@@ -247,11 +250,11 @@ def main():
         "-s", "--size", type=int, default=DEFAULT_STICKER_SIZE,
         help=f"Maximum sticker dimension in pixels (default: {DEFAULT_STICKER_SIZE})"
     )
-    device_help = "Target device code (default: N5). Known codes: " + ", ".join(
+    device_help = "Target device code (default: N6). Known codes: " + ", ".join(
         f"{code}={info['name']}" for code, info in DEVICES.items()
     )
     parser.add_argument(
-        "-d", "--device", default="N5",
+        "-d", "--device", default="N6",
         help=device_help,
     )
 

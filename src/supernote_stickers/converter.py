@@ -7,6 +7,7 @@ used from both the CLI and the web application without modification
 
 from __future__ import annotations
 
+import random
 import struct
 import time
 import uuid
@@ -35,7 +36,7 @@ AA_LEVELS: list[int] = [
 # ---------------------------------------------------------------------------
 
 DEVICES: dict[str, dict] = {
-    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
+    "N6":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
     "A5X": {"name": "A5X",                      "screen": (1404, 1872)},
     "A6X": {"name": "A6X",                      "screen": (1404, 1872)},
 }
@@ -152,10 +153,18 @@ def encode_rle(pixels: list[int]) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _generate_file_id() -> str:
-    """Generate a unique file ID in Supernote's format."""
+    """Generate a unique file ID in Supernote's format.
+
+    The ID is 33 characters: ``F`` + 14-digit timestamp + 3-digit
+    milliseconds + 15-character alphanumeric suffix, matching the
+    format used by official Supernote sticker tools.
+    """
     timestamp = time.strftime("%Y%m%d%H%M%S")
     ms = f"{int(time.time() * 1000) % 1000:03d}"
-    suffix = uuid.uuid4().hex[:13]
+    # 15-char mixed-case alphanumeric suffix to match official format
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    rng = random.Random(uuid.uuid4().int)
+    suffix = "".join(rng.choice(alphabet) for _ in range(15))
     return f"F{timestamp}{ms}{suffix}"
 
 
@@ -163,7 +172,7 @@ def build_sticker(
     pixels: list[int],
     width: int,
     height: int,
-    device: str = "N5",
+    device: str = "N6",
 ) -> bytes:
     """Assemble a complete ``.sticker`` binary from pixel data.
 
@@ -231,7 +240,7 @@ def build_sticker(
 def build_snstk(
     images: list[tuple[str, str | Path | BinaryIO]],
     size: int = DEFAULT_STICKER_SIZE,
-    device: str = "N5",
+    device: str = "N6",
 ) -> bytes:
     """Build an SNSTK sticker pack and return its raw bytes.
 

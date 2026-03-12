@@ -139,7 +139,7 @@ class TestImageToPixels:
 # ---------------------------------------------------------------------------
 
 class TestBuildSticker:
-    def _make_sticker(self, device="N5"):
+    def _make_sticker(self, device="N6"):
         pixels = [COLORCODE_BLACK] * 100
         return build_sticker(pixels, 10, 10, device)
 
@@ -220,5 +220,5 @@ class TestConstants:
     def test_supported_extensions_includes_jpg(self):
         assert ".jpg" in SUPPORTED_EXTENSIONS
 
-    def test_devices_has_n5(self):
-        assert "N5" in DEVICES
+    def test_devices_has_n6(self):
+        assert "N6" in DEVICES

@@ -49,14 +49,14 @@ def convert():
     Form fields:
         files[]  – one or more image files
         size     – max sticker dimension (optional, default 180)
-        device   – device code (optional, default "N5")
+        device   – device code (optional, default "N6")
     """
     uploaded = request.files.getlist("files[]")
     if not uploaded:
         return jsonify({"error": "No files uploaded."}), 400
 
     size = int(request.form.get("size", DEFAULT_STICKER_SIZE))
-    device = request.form.get("device", "N5")
+    device = request.form.get("device", "N6")
 
     if device not in DEVICES:
         return jsonify({"error": f"Unknown device code: {device!r}"}), 400

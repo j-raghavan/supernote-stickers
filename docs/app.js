@@ -160,14 +160,16 @@ const RLEEncoder = {
 // ---------------------------------------------------------------------------
 
 const StickerBuilder = {
-  /** @returns {string} */
+  /** @returns {string}  33-char ID matching official Supernote format. */
   _generateFileId() {
     const now  = new Date();
     const pad  = (n, len = 2) => String(n).padStart(len, '0');
     const ts   = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
                + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const ms   = pad(now.getMilliseconds(), 3);
-    const rand = crypto.randomUUID().replace(/-/g, '').slice(0, 13);
+    const alphabet = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    const arr  = crypto.getRandomValues(new Uint8Array(15));
+    const rand = Array.from(arr, b => alphabet[b % alphabet.length]).join('');
     return `F${ts}${ms}${rand}`;
   },
 
@@ -187,10 +189,10 @@ const StickerBuilder = {
    * @param {Uint8Array} pixels  Row-major colour codes
    * @param {number}     width
    * @param {number}     height
-   * @param {string}     device  e.g. "N5"
+   * @param {string}     device  e.g. "N6"
    * @returns {Uint8Array}
    */
-  build(pixels, width, height, device = 'N5') {
+  build(pixels, width, height, device = 'N6') {
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
