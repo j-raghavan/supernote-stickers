@@ -166,7 +166,7 @@
         <label for="device">Target device</label>
         <select id="device" name="device">
           {% for code, info in devices.items() %}
-          <option value="{{ code }}" {% if code == "N6" %}selected{% endif %}>
+          <option value="{{ code }}" {% if code == "N5" %}selected{% endif %}>
             {{ code }} – {{ info.name }}
           </option>
           {% endfor %}

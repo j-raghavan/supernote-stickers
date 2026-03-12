@@ -36,7 +36,7 @@ AA_LEVELS: list[int] = [
 # ---------------------------------------------------------------------------
 
 DEVICES: dict[str, dict] = {
-    "N6":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
+    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
     "A5X": {"name": "A5X",                      "screen": (1404, 1872)},
     "A6X": {"name": "A6X",                      "screen": (1404, 1872)},
 }
@@ -149,6 +149,103 @@ def encode_rle(pixels: list[int]) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Trails builder
+# ---------------------------------------------------------------------------
+
+def build_trails(pixels: list[int], width: int, height: int, device: str = "N5") -> bytes:
+    """Build the trails section required by the Supernote firmware.
+
+    The Supernote device uses the trails section to render stickers when
+    they are inserted into notes.  Without valid trails data the device
+    displays "Inserting..." indefinitely.
+
+    This implementation uses a binary template extracted from a known-working
+    sticker (christmas2025.snstk).  The template contains a minimal valid
+    record with 4 coordinate pairs that the firmware can parse successfully.
+    Only the screen dimensions are adjusted per target device.
+
+    The trails data does not affect the visual appearance of the sticker
+    (the bitmap handles that) -- it just needs to be structurally valid
+    so the firmware doesn't hang.
+
+    Args:
+        pixels: Supernote colour codes (row-major, length = *width* x *height*).
+        width:  Sticker width in pixels.
+        height: Sticker height in pixels.
+        device: Device code key from :data:`DEVICES`.
+
+    Returns:
+        Raw bytes for the trails block (**excluding** the leading uint32
+        length prefix -- the caller wraps it).
+    """
+    _pack_u32 = struct.Struct("<I").pack
+
+    screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
+
+    # ------------------------------------------------------------------
+    # Minimal valid record template (536 bytes)
+    # ------------------------------------------------------------------
+    # Extracted from record 11 of christmas2025.snstk (Christmas Dog).
+    # Structure (all little-endian):
+    #   Bytes   0- 27: Record marker  (0x20, 0xFFFFFFFF, type=3, pad, 5000, pad)
+    #   Bytes  28- 79: Tool name      "others" null-padded to 52 bytes
+    #   Bytes  80-115: Bounding box   9 x uint32
+    #   Bytes 116-167: Annotation     "superNoteNote" null-padded to 52 bytes
+    #   Bytes 168-191: Post-annot     uint32(1) + 20 zero bytes
+    #   Bytes 192-195: Coord count    uint32(4)
+    #   Bytes 196-227: Coordinates    4 x (uint32 x, uint32 y) pairs
+    #   Bytes 228-231: Timing count   uint32(4)
+    #   Bytes 232-239: Timing data    4 x uint16 values
+    #   Bytes 240-243: Pressure count uint32(4)
+    #   Bytes 244-259: Pressure data  4 x (uint16, uint16) pairs
+    #   Bytes 260-263: Pen-type count uint32(4)
+    #   Bytes 264-267: Pen-type data  4 x uint8(1)
+    #   Bytes 268-413: Per-stroke metadata + float32 coords + sub-stroke data
+    #   Bytes 414-535: Footer (FF block, double, screen dims, "none" strings)
+    #
+    # Screen width  is at byte offset 455 (uint32 LE)
+    # Screen height is at byte offset 459 (uint32 LE)
+    # ------------------------------------------------------------------
+    _RECORD_TEMPLATE_HEX = (
+        "20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065"
+        "724e6f74654e6f746500000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000100000000000000000000000000000000000000000000000400000025050000"
+        "083b000025050000083b0000270500000a3b0000290500000b3b000004000000c000f8004901f400"
+        "04000000540b9001540b9001540bf401f00a58020400000001010101000000000000000000000000"
+        "61000000ec0300000000000000000000000000000000000001000000010000000000000000000000"
+        "0100000001000000000000000000000000000000000101000000080000007a4403438a571b43a06d"
+        "024388241b437463014306e41b431a310143d8b91c43a2ac01434c791d438483024348ac1d43b28d"
+        "0343caec1c4310c0034302171c4301000000ffffffffffffffffffffffffffffffffffffffff4dac"
+        "33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000"
+        "6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000"
+        "00000000dc0000000a00000000000000"
+    )
+    record = bytearray(bytes.fromhex(_RECORD_TEMPLATE_HEX))
+
+    # Patch screen dimensions for the target device
+    struct.pack_into("<I", record, 455, screen_w)
+    struct.pack_into("<I", record, 459, screen_h)
+
+    # ------------------------------------------------------------------
+    # Global header (28 bytes)
+    # ------------------------------------------------------------------
+    buf = bytearray()
+    buf += _pack_u32(1)       # stroke count (1 record)
+    buf += _pack_u32(4)       # total coordinate count in record
+    buf += _pack_u32(10)      # constant (observed in all working stickers)
+    buf += _pack_u32(0)       # reserved
+    buf += _pack_u32(4)       # secondary value
+    buf += _pack_u32(10)      # constant
+    buf += _pack_u32(0)       # reserved
+
+    buf += record
+
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
 # .sticker file builder
 # ---------------------------------------------------------------------------
 
@@ -172,7 +269,7 @@ def build_sticker(
     pixels: list[int],
     width: int,
     height: int,
-    device: str = "N6",
+    device: str = "N5",
 ) -> bytes:
     """Assemble a complete ``.sticker`` binary from pixel data.
 
@@ -205,9 +302,10 @@ def build_sticker(
     rle_data = encode_rle(pixels)
     bitmap_block = struct.pack("<I", len(rle_data)) + rle_data
 
-    # Section 3 – trails (empty for image-imported stickers)
+    # Section 3 – trails (required for sticker insertion)
     trails_offset = bitmap_offset + len(bitmap_block)
-    trails_block = struct.pack("<I", 0)
+    trails_data = build_trails(pixels, width, height, device)
+    trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # Section 4 – sticker rect
     rect_offset = trails_offset + len(trails_block)
@@ -240,7 +338,7 @@ def build_sticker(
 def build_snstk(
     images: list[tuple[str, str | Path | BinaryIO]],
     size: int = DEFAULT_STICKER_SIZE,
-    device: str = "N6",
+    device: str = "N5",
 ) -> bytes:
     """Build an SNSTK sticker pack and return its raw bytes.
 

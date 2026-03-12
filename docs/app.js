@@ -156,6 +156,91 @@ const RLEEncoder = {
 };
 
 // ---------------------------------------------------------------------------
+// TrailsBuilder – synthesises the trails section the device needs
+// ---------------------------------------------------------------------------
+
+const TrailsBuilder = {
+  /**
+   * Known device screen dimensions.
+   */
+  DEVICES: {
+    N5:  { screen: [1920, 2560] },
+    A5X: { screen: [1404, 1872] },
+    A6X: { screen: [1404, 1872] },
+  },
+
+  /**
+   * Minimal valid record template (536 bytes) extracted from a known-working
+   * sticker (record 11 of christmas2025.snstk).  Contains a single stroke
+   * with 4 coordinate pairs that the Supernote firmware can parse.
+   *
+   * Screen width  is at byte offset 455 (uint32 LE).
+   * Screen height is at byte offset 459 (uint32 LE).
+   */
+  _RECORD_TEMPLATE_HEX:
+    '20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000'
+    + '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
+    + '810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065'
+    + '724e6f74654e6f746500000000000000000000000000000000000000000000000000000000000000'
+    + '00000000000000000100000000000000000000000000000000000000000000000400000025050000'
+    + '083b000025050000083b0000270500000a3b0000290500000b3b000004000000c000f8004901f400'
+    + '04000000540b9001540b9001540bf401f00a58020400000001010101000000000000000000000000'
+    + '61000000ec0300000000000000000000000000000000000001000000010000000000000000000000'
+    + '0100000001000000000000000000000000000000000101000000080000007a4403438a571b43a06d'
+    + '024388241b437463014306e41b431a310143d8b91c43a2ac01434c791d438483024348ac1d43b28d'
+    + '0343caec1c4310c0034302171c4301000000ffffffffffffffffffffffffffffffffffffffff4dac'
+    + '33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000'
+    + '6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000'
+    + '00000000dc0000000a00000000000000',
+
+  _hexToBytes(hex) {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    }
+    return bytes;
+  },
+
+  _packU32(arr, val) {
+    arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF);
+  },
+
+  /**
+   * Build a minimal valid trails section using a binary template from a
+   * known-working sticker.  Only the screen dimensions are adjusted for
+   * the target device.
+   *
+   * @param {Uint8Array} pixels  Row-major colour codes (unused – kept for API compat)
+   * @param {number}     width   Sticker width (unused – kept for API compat)
+   * @param {number}     height  Sticker height (unused – kept for API compat)
+   * @param {string}     device  Device code, e.g. "N5"
+   * @returns {Uint8Array}
+   */
+  build(pixels, width, height, device = 'N5') {
+    const record = this._hexToBytes(this._RECORD_TEMPLATE_HEX);
+    const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
+
+    // Patch screen dimensions in the record template
+    const dv = new DataView(record.buffer);
+    dv.setUint32(455, screenW, true);
+    dv.setUint32(459, screenH, true);
+
+    // Global header (28 bytes): 1 record, fixed metadata
+    const out = [];
+    this._packU32(out, 1);   // stroke count
+    this._packU32(out, 4);   // total coords
+    this._packU32(out, 10);  // constant
+    this._packU32(out, 0);   // reserved
+    this._packU32(out, 4);   // secondary value
+    this._packU32(out, 10);  // constant
+    this._packU32(out, 0);   // reserved
+
+    out.push(...record);
+    return new Uint8Array(out);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // StickerBuilder – assembles a single .sticker binary
 // ---------------------------------------------------------------------------
 
@@ -189,10 +274,10 @@ const StickerBuilder = {
    * @param {Uint8Array} pixels  Row-major colour codes
    * @param {number}     width
    * @param {number}     height
-   * @param {string}     device  e.g. "N6"
+   * @param {string}     device  e.g. "N5"
    * @returns {Uint8Array}
    */
-  build(pixels, width, height, device = 'N6') {
+  build(pixels, width, height, device = 'N5') {
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -220,9 +305,12 @@ const StickerBuilder = {
     this._writeU32(bitmapBlock, rle.length);
     bitmapBlock.push(...rle);
 
-    // --- Section 3 – trails (empty) ---
+    // --- Section 3 – trails (required for sticker insertion) ---
     const trailsOffset = bitmapOffset + bitmapBlock.length;
-    const trailsBlock  = [0, 0, 0, 0]; // uint32 = 0
+    const trailsData   = TrailsBuilder.build(pixels, width, height, device);
+    const trailsBlock  = [];
+    this._writeU32(trailsBlock, trailsData.length);
+    trailsBlock.push(...trailsData);
 
     // --- Section 4 – rect ---
     const rectOffset = trailsOffset + trailsBlock.length;

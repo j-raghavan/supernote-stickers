@@ -42,7 +42,7 @@ AA_LEVELS = [0x0F, 0x1F, 0x2F, 0x3F, 0x4F, 0x5F, 0x6F, 0x7F,
 # Sticker pixel size is independent of device resolution, but the device
 # code is stored in the header metadata as APPLY_EQUIPMENT.
 DEVICES = {
-    "N6":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
+    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
     "A5X": {"name": "A5X",                      "screen": (1404, 1872)},
     "A6X": {"name": "A6X",                      "screen": (1404, 1872)},
 }
@@ -152,14 +152,63 @@ def generate_file_id() -> str:
     return f"F{timestamp}{ms}{suffix}"
 
 
-def build_sticker(pixels: list[int], width: int, height: int, device: str = "N6") -> bytes:
+def _build_trails(pixels: list[int], width: int, height: int, device: str = "N5") -> bytes:
+    """Build the trails section required by the Supernote firmware.
+
+    Uses a binary template extracted from a known-working sticker
+    (christmas2025.snstk record 11).  Only screen dimensions are
+    adjusted for the target device.
+    """
+    _pack_u32 = struct.Struct("<I").pack
+
+    screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
+
+    # Minimal valid record template (536 bytes) from christmas2025.snstk
+    # Screen width at byte offset 455, screen height at byte offset 459.
+    _RECORD_TEMPLATE_HEX = (
+        "20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065"
+        "724e6f74654e6f746500000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000100000000000000000000000000000000000000000000000400000025050000"
+        "083b000025050000083b0000270500000a3b0000290500000b3b000004000000c000f8004901f400"
+        "04000000540b9001540b9001540bf401f00a58020400000001010101000000000000000000000000"
+        "61000000ec0300000000000000000000000000000000000001000000010000000000000000000000"
+        "0100000001000000000000000000000000000000000101000000080000007a4403438a571b43a06d"
+        "024388241b437463014306e41b431a310143d8b91c43a2ac01434c791d438483024348ac1d43b28d"
+        "0343caec1c4310c0034302171c4301000000ffffffffffffffffffffffffffffffffffffffff4dac"
+        "33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000"
+        "6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000"
+        "00000000dc0000000a00000000000000"
+    )
+    record = bytearray(bytes.fromhex(_RECORD_TEMPLATE_HEX))
+
+    # Patch screen dimensions
+    struct.pack_into("<I", record, 455, screen_w)
+    struct.pack_into("<I", record, 459, screen_h)
+
+    # Global header (28 bytes)
+    buf = bytearray()
+    buf += _pack_u32(1)       # stroke count
+    buf += _pack_u32(4)       # total coords
+    buf += _pack_u32(10)      # constant
+    buf += _pack_u32(0)       # reserved
+    buf += _pack_u32(4)       # secondary value
+    buf += _pack_u32(10)      # constant
+    buf += _pack_u32(0)       # reserved
+
+    buf += record
+    return bytes(buf)
+
+
+def build_sticker(pixels: list[int], width: int, height: int, device: str = "N5") -> bytes:
     """Build a complete .sticker file from pixel data.
 
     Args:
         pixels: List of Supernote color codes.
         width: Sticker width in pixels.
         height: Sticker height in pixels.
-        device: Device code (N6=Manta/Nomad, A5X, A6X).
+        device: Device code (N5=Manta/Nomad, A5X, A6X).
     """
     # --- Section 1: File header ---
     magic = b"stck"
@@ -182,11 +231,10 @@ def build_sticker(pixels: list[int], width: int, height: int, device: str = "N6"
     rle_data = encode_rle(pixels)
     bitmap_block = struct.pack("<I", len(rle_data)) + rle_data
 
-    # --- Section 3: Trails (empty for bitmap-only stickers) ---
-    # For PNG-imported stickers, we create a minimal empty trails block
+    # --- Section 3: Trails (required for sticker insertion) ---
     trails_offset = bitmap_offset + len(bitmap_block)
-    # Minimal trails data: just a length of 0
-    trails_block = struct.pack("<I", 0)
+    trails_data = _build_trails(pixels, width, height, device)
+    trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # --- Section 4: Sticker rect ---
     rect_offset = trails_offset + len(trails_block)
@@ -213,7 +261,7 @@ def build_sticker(pixels: list[int], width: int, height: int, device: str = "N6"
 
 
 def create_snstk(output_path: str, png_paths: list[str], size: int = DEFAULT_STICKER_SIZE,
-                 device: str = "N6") -> None:
+                 device: str = "N5") -> None:
     """Create a .snstk sticker pack from PNG files.
 
     Args:
@@ -250,11 +298,11 @@ def main():
         "-s", "--size", type=int, default=DEFAULT_STICKER_SIZE,
         help=f"Maximum sticker dimension in pixels (default: {DEFAULT_STICKER_SIZE})"
     )
-    device_help = "Target device code (default: N6). Known codes: " + ", ".join(
+    device_help = "Target device code (default: N5). Known codes: " + ", ".join(
         f"{code}={info['name']}" for code, info in DEVICES.items()
     )
     parser.add_argument(
-        "-d", "--device", default="N6",
+        "-d", "--device", default="N5",
         help=device_help,
     )
 

@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     device_choices = list(DEVICES.keys())
     parser.add_argument(
         "-d", "--device",
-        default="N6",
+        default="N5",
         choices=device_choices,
         help=(
             "Target device – "
