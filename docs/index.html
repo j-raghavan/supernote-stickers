@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Supernote Sticker Converter</title>
+  <meta name="description"
+        content="Convert PNG, JPG, and other images to Supernote .snstk sticker packs – runs entirely in your browser." />
+
+  <!-- JSZip for building the ZIP/SNSTK archive in the browser -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <style>
+    :root {
+      --bg:      #1a1a2e;
+      --surface: #16213e;
+      --card:    #0f3460;
+      --accent:  #e94560;
+      --text:    #eaeaea;
+      --muted:   #a0aec0;
+      --green:   #68d391;
+      --red:     #fc8181;
+      --radius:  12px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2.5rem 1rem 4rem;
+      line-height: 1.6;
+    }
+
+    /* ---------- header ---------- */
+    header { text-align: center; margin-bottom: 2.5rem; }
+    header h1 {
+      font-size: 2.4rem;
+      color: var(--accent);
+      letter-spacing: 1px;
+    }
+    header p { color: var(--muted); margin-top: .5rem; font-size: 1.05rem; }
+
+    /* ---------- card ---------- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--card);
+      border-radius: var(--radius);
+      padding: 2rem;
+      width: 100%;
+      max-width: 640px;
+    }
+
+    /* ---------- drop zone ---------- */
+    .drop-zone {
+      border: 2px dashed var(--card);
+      border-radius: var(--radius);
+      padding: 2.5rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      margin-bottom: 1.5rem;
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(233,69,96,.06);
+    }
+    .drop-zone .icon { font-size: 3rem; }
+    .drop-zone p     { margin-top: .6rem; color: var(--muted); }
+    .drop-zone input { display: none; }
+
+    /* ---------- file list ---------- */
+    .file-list { list-style: none; margin-bottom: 1.5rem; }
+    .file-list li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card);
+      border-radius: 8px;
+      padding: .5rem .9rem;
+      margin-bottom: .4rem;
+      font-size: .9rem;
+    }
+    .file-list .status-icon { margin-left: .5rem; }
+    .file-list .remove {
+      background: none;
+      border: none;
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 1.1rem;
+      padding: 0 .2rem;
+    }
+
+    /* ---------- options row ---------- */
+    .row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .field { flex: 1; min-width: 160px; }
+    label { display: block; font-weight: 600; margin-bottom: .3rem; }
+    .hint { font-size: .83rem; color: var(--muted); margin-top: .25rem; }
+    input[type=number], select {
+      width: 100%;
+      padding: .5rem .8rem;
+      background: var(--bg);
+      border: 1px solid var(--card);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: .95rem;
+    }
+
+    /* ---------- button ---------- */
+    .btn {
+      display: block;
+      width: 100%;
+      padding: .9rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 1.05rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { opacity: .87; }
+
+    /* ---------- progress ---------- */
+    .progress-wrap {
+      margin-top: 1rem;
+      background: var(--card);
+      border-radius: 999px;
+      height: 8px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      transition: width .3s ease;
+      width: 0%;
+    }
+
+    #status {
+      margin-top: .9rem;
+      text-align: center;
+      font-size: .95rem;
+      min-height: 1.4rem;
+    }
+    .error   { color: var(--red); }
+    .success { color: var(--green); }
+
+    /* ---------- disclaimer ---------- */
+    .disclaimer {
+      margin-top: 2rem;
+      background: var(--surface);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 1.2rem 1.5rem;
+      font-size: .88rem;
+      color: var(--muted);
+      max-width: 640px;
+      width: 100%;
+    }
+    .disclaimer strong { color: var(--text); }
+
+    /* ---------- how-to ---------- */
+    .howto {
+      margin-top: 2rem;
+      max-width: 640px;
+      width: 100%;
+    }
+    .howto h2 { font-size: 1.1rem; color: var(--accent); margin-bottom: .6rem; }
+    .howto ol { padding-left: 1.3rem; }
+    .howto li { color: var(--muted); margin-bottom: .35rem; font-size: .9rem; }
+
+    /* ---------- footer ---------- */
+    footer {
+      margin-top: 2.5rem;
+      color: var(--muted);
+      font-size: .82rem;
+      text-align: center;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+
+<!-- ===== Header ===== -->
+<header>
+  <h1>📓 Supernote Sticker Converter</h1>
+  <p>Upload images → get a <code>.snstk</code> sticker pack – <strong>runs entirely in your browser</strong></p>
+</header>
+
+<!-- ===== Main card ===== -->
+<div class="card">
+
+  <!-- Drop zone -->
+  <div class="drop-zone" id="dropZone" role="button" aria-label="Upload images">
+    <div class="icon" aria-hidden="true">🖼️</div>
+    <p>Drag &amp; drop images here, or <strong>click to browse</strong></p>
+    <p class="hint">PNG · JPG · JPEG · WebP · BMP · GIF · TIFF</p>
+    <input type="file" id="fileInput" multiple
+           accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.tif" />
+  </div>
+
+  <!-- Selected file list -->
+  <ul class="file-list" id="fileList" aria-live="polite"></ul>
+
+  <!-- Options -->
+  <div class="row">
+    <div class="field">
+      <label for="size">Max dimension (px)</label>
+      <input type="number" id="size" value="180" min="32" max="512" step="1" />
+      <p class="hint">Stickers are scaled to fit inside this square.</p>
+    </div>
+    <div class="field">
+      <label for="device">Target device</label>
+      <select id="device">
+        <option value="N5" selected>N5 – A5X2 Manta / A6X2 Nomad</option>
+        <option value="A5X">A5X – A5X</option>
+        <option value="A6X">A6X – A6X</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Convert button -->
+  <button class="btn" id="convertBtn" disabled>⬇️ Convert &amp; Download</button>
+
+  <!-- Progress bar -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+
+  <p id="status" aria-live="polite"></p>
+</div>
+
+<!-- ===== How-to ===== -->
+<div class="howto">
+  <h2>📋 How to use your sticker pack</h2>
+  <ol>
+    <li>Download the <code>.snstk</code> file above.</li>
+    <li>Connect your Supernote to your computer (USB or Supernote cloud).</li>
+    <li>Copy the file to your Supernote's <strong>EXPORT</strong> folder.</li>
+    <li>On your Supernote, open <strong>Settings › Stickers</strong> and import.</li>
+  </ol>
+</div>
+
+<!-- ===== Disclaimer ===== -->
+<div class="disclaimer">
+  <strong>⚠️ Disclaimer</strong><br />
+  This tool is an <em>independent fan project</em> created by a Supernote enthusiast
+  who wants to give back to the community. It is <strong>not affiliated with,
+  endorsed by, or officially supported by Ratta Supernote</strong>.
+  Your images are processed <em>entirely in your browser</em> – no files are ever
+  uploaded to any server. Use at your own risk. All product names and trademarks
+  are the property of their respective owners.
+</div>
+
+<footer>
+  Made with ❤️ for the Supernote community ·
+  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank"
+     rel="noopener noreferrer">View on GitHub</a>
+</footer>
+
+<!-- ===== Application JavaScript ===== -->
+<script src="app.js"></script>
+
+</body>
+</html>
