@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Supernote Sticker Converter</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --surface: #16213e;
+      --card: #0f3460;
+      --accent: #e94560;
+      --text: #eaeaea;
+      --muted: #a0aec0;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+    header { text-align: center; margin-bottom: 2rem; }
+    header h1 { font-size: 2.2rem; color: var(--accent); letter-spacing: 1px; }
+    header p  { color: var(--muted); margin-top: .4rem; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--card);
+      border-radius: var(--radius);
+      padding: 2rem;
+      width: 100%;
+      max-width: 600px;
+    }
+
+    label { display: block; margin-bottom: .5rem; font-weight: 600; }
+    .hint { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
+
+    .drop-zone {
+      border: 2px dashed var(--card);
+      border-radius: var(--radius);
+      padding: 2.5rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s;
+      margin-bottom: 1.5rem;
+    }
+    .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); }
+    .drop-zone input[type=file] { display: none; }
+    .drop-zone .icon { font-size: 3rem; }
+    .drop-zone p { margin-top: .6rem; color: var(--muted); }
+
+    .file-list { list-style: none; margin: 0 0 1.5rem; }
+    .file-list li {
+      background: var(--card);
+      border-radius: 8px;
+      padding: .5rem .8rem;
+      margin-bottom: .4rem;
+      font-size: .9rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .file-list .remove {
+      cursor: pointer;
+      color: var(--accent);
+      font-size: 1.1rem;
+      background: none;
+      border: none;
+      color: var(--accent);
+    }
+
+    .row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .field { flex: 1; min-width: 160px; }
+    input[type=number], select {
+      width: 100%;
+      padding: .5rem .8rem;
+      background: var(--bg);
+      border: 1px solid var(--card);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: .95rem;
+      margin-top: .3rem;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: .85rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 1.05rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { opacity: .88; }
+
+    #status {
+      margin-top: 1rem;
+      text-align: center;
+      font-size: .95rem;
+      min-height: 1.4rem;
+    }
+    .error   { color: #fc8181; }
+    .success { color: #68d391; }
+
+    .disclaimer {
+      margin-top: 2rem;
+      background: var(--surface);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 1.2rem 1.5rem;
+      font-size: .88rem;
+      color: var(--muted);
+      max-width: 600px;
+      width: 100%;
+    }
+    .disclaimer strong { color: var(--text); }
+
+    footer {
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: .82rem;
+      text-align: center;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>📓 Supernote Sticker Converter</h1>
+  <p>Upload images → get a <code>.snstk</code> sticker pack for your Supernote device</p>
+</header>
+
+<div class="card">
+  <form id="convertForm" enctype="multipart/form-data">
+
+    <div class="drop-zone" id="dropZone">
+      <div class="icon">🖼️</div>
+      <p>Drag &amp; drop images here, or <strong>click to browse</strong></p>
+      <p class="hint">Supported: {{ supported_extensions | join(', ') }}</p>
+      <input type="file" id="fileInput" name="files[]" multiple
+             accept="{{ supported_extensions | join(',') }}" />
+    </div>
+
+    <ul class="file-list" id="fileList"></ul>
+
+    <div class="row">
+      <div class="field">
+        <label for="size">Max dimension (px)</label>
+        <input type="number" id="size" name="size"
+               value="{{ default_size }}" min="32" max="512" step="1" />
+        <p class="hint">Stickers are scaled to fit inside this square.</p>
+      </div>
+      <div class="field">
+        <label for="device">Target device</label>
+        <select id="device" name="device">
+          {% for code, info in devices.items() %}
+          <option value="{{ code }}" {% if code == "N5" %}selected{% endif %}>
+            {{ code }} – {{ info.name }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <button type="submit" class="btn" id="convertBtn" disabled>
+      ⬇️ Convert &amp; Download
+    </button>
+    <p id="status"></p>
+  </form>
+</div>
+
+<div class="disclaimer">
+  <strong>⚠️ Disclaimer</strong><br />
+  This tool is an <em>independent fan project</em> created by a Supernote
+  enthusiast who wants to give back to the community. It is <strong>not
+  affiliated with, endorsed by, or officially supported by Ratta Supernote</strong>.
+  Use at your own risk. All product names and trademarks are the property of
+  their respective owners.
+</div>
+
+<footer>
+  Made with ❤️ for the Supernote community ·
+  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank">GitHub</a>
+</footer>
+
+<script>
+  const dropZone   = document.getElementById('dropZone');
+  const fileInput  = document.getElementById('fileInput');
+  const fileList   = document.getElementById('fileList');
+  const convertBtn = document.getElementById('convertBtn');
+  const statusEl   = document.getElementById('status');
+
+  let selectedFiles = [];
+
+  // ---- Drop zone ----
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    addFiles([...e.dataTransfer.files]);
+  });
+  fileInput.addEventListener('change', () => addFiles([...fileInput.files]));
+
+  function addFiles(newFiles) {
+    newFiles.forEach(f => {
+      if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
+        selectedFiles.push(f);
+      }
+    });
+    renderList();
+  }
+
+  function renderList() {
+    fileList.innerHTML = '';
+    selectedFiles.forEach((f, i) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span>📄 ${f.name} <em style="color:var(--muted)">(${(f.size/1024).toFixed(1)} KB)</em></span>
+                      <button class="remove" data-i="${i}" title="Remove">✕</button>`;
+      fileList.appendChild(li);
+    });
+    fileList.querySelectorAll('.remove').forEach(btn =>
+      btn.addEventListener('click', () => { selectedFiles.splice(+btn.dataset.i, 1); renderList(); })
+    );
+    convertBtn.disabled = selectedFiles.length === 0;
+    statusEl.textContent = '';
+    statusEl.className = '';
+  }
+
+  // ---- Submit ----
+  document.getElementById('convertForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!selectedFiles.length) return;
+
+    convertBtn.disabled = true;
+    statusEl.className  = '';
+    statusEl.textContent = '⏳ Converting…';
+
+    const fd = new FormData();
+    selectedFiles.forEach(f => fd.append('files[]', f));
+    fd.append('size',   document.getElementById('size').value);
+    fd.append('device', document.getElementById('device').value);
+
+    try {
+      const res = await fetch('/convert', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(json.error || res.statusText);
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = Object.assign(document.createElement('a'), {
+        href: url, download: 'stickers.snstk'
+      });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = '✅ Download started!';
+      statusEl.className   = 'success';
+    } catch (err) {
+      statusEl.textContent = `❌ ${err.message}`;
+      statusEl.className   = 'error';
+    } finally {
+      convertBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
