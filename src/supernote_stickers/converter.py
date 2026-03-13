@@ -16,6 +16,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
+import cv2
+import numpy as np
 from PIL import Image
 
 # ---------------------------------------------------------------------------
@@ -149,20 +151,370 @@ def encode_rle(pixels: list[int]) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Trails builder
+# Custom IEEE 754 encoding (Supernote contour coordinates)
 # ---------------------------------------------------------------------------
 
-def build_trails(pixels: list[int], width: int, height: int, device: str = "N5") -> bytes:
-    """Build the trails section required by the Supernote firmware.
+def _decimal_to_custom_ieee754(value: float) -> bytes:
+    """Encode a float as Supernote's custom IEEE 754 format.
 
-    The Supernote device uses the trails section to render stickers when
-    they are inserted into notes.  Without valid trails data the device
-    displays "Inserting..." indefinitely.
+    This is standard little-endian IEEE 754 single-precision with the
+    first two bytes swapped:  ``std[1], std[0], std[2], std[3]``.
 
-    This implementation uses a binary template extracted from a known-working
-    sticker (christmas2025.snstk).  The template contains a minimal valid
-    stroke record with 4 coordinate pairs that the firmware can parse.
-    Only the screen dimensions are adjusted per target device.
+    Verified against the ``decimal_to_custom_ieee754`` function in the
+    PySN/snex reference implementation.
+    """
+    if value == 0.0:
+        return b'\x00\x00\x00\x00'
+    std = struct.pack('<f', value)
+    return bytes([std[1], std[0], std[2], std[3]])
+
+
+# ---------------------------------------------------------------------------
+# Stroke record binary constants
+# ---------------------------------------------------------------------------
+# These byte sequences define the fixed parts of a Supernote pen stroke
+# record.  They were verified against both the PySN/snex reference
+# implementation (pen_strokes_dict_to_bytes) and a working sticker from
+# christmas2025.snstk.
+#
+# A stroke record body (everything after the 20-byte stroke header) has
+# this layout:
+#
+#   body[ 0:  8]  Record marker (8 bytes)
+#   body[ 8: 28]  Page/type + padding + constants (20 bytes)
+#   body[28: 80]  Tool name "others" null-padded (52 bytes)
+#   body[80:104]  Bounding box: min_x, min_y, avg_x, avg_y, max_x, max_y (6×i32)
+#   body[104:116] Device info (12 bytes, device-specific)
+#   body[116:168] Annotation "superNoteNote" null-padded (52 bytes)
+#   body[168:192] Flags (24 bytes)
+#   body[192+]    Vector points, pressure, unique, one arrays, then
+#                 post-array metadata, contours, and r_bytes.
+# ---------------------------------------------------------------------------
+
+# Record marker (body[0:8])
+_MARKER = bytes.fromhex('20000000ffffffff')
+
+# Page/type + padding + constants (body[8:28])
+# Byte 0 must be 0x03 — verified in both Christmas Dog and Stocking strokes.
+_PAGE_CONST = bytes.fromhex(
+    '03000000'   # page = 3 (required by firmware)
+    '00000000'   # padding
+    '00000000'   # padding
+    '88130000'   # constant = 5000
+    '00000000'   # padding
+)
+
+# Tool name "others" null-padded to 52 bytes (body[28:80])
+_TOOL_NAME = (b'others' + b'\x00' * 46)
+
+# Device info (12 bytes each) — body[104:116]
+# First u32 must be 0x1a (26) — verified in both Christmas Dog and Stocking.
+# PySN/snex uses 0x02 for notebook strokes, but sticker strokes require 0x1a.
+_DEVICE_INFO_N5 = bytes.fromhex('1a00000080540000603f0000')
+_DEVICE_INFO_OTHER = bytes.fromhex('1a000000cb3d0000582e0000')
+
+# Annotation "superNoteNote" null-padded to 52 bytes (body[116:168])
+_ANNOTATION = (b'superNoteNote' + b'\x00' * 39)
+
+# Flags (24 bytes) — body[168:192]
+_FLAGS = bytes.fromhex(
+    '01000000000000000000000000000000'
+    '0000000000000000'
+)
+
+# 54 fixed bytes between stroke_nb and contours_count
+# Last byte must be 0x01 — verified in Christmas Dog working strokes.
+_POST_STROKE_NB = bytes.fromhex(
+    '00000000000000000000000000000000'
+    '01000000010000000000000000000000'
+    '01000000010000000000000000000000'
+    '000000000001'
+)
+
+# r_bytes template (94 bytes) — tail of every stroke record.
+# Extracted verbatim from a working Christmas Dog sticker stroke.
+# Contains FF block, double constant, screen dimensions, "none" strings,
+# and pen metadata.  Screen width at offset 37, height at offset 41.
+_R_BYTES_TEMPLATE = bytes.fromhex(
+    "ffffffffffffffffffffffffffffffffffffffff"   # 20 × 0xFF
+    "4dac33dcb771d43f"                           # double constant
+    "002f0000000000000080070000000a00"           # 14 bytes (screen_w at +37)
+    "00000000000004000000"                       # 10 bytes (screen_h at +41)
+    "6e6f6e65"                                   # "none"
+    "040000006e6f6e65"                           # 4 + "none"
+    "00000000"                                   # 4 zeros
+    "0300000002000000"                           # 8 bytes
+    "00000000000000000000000000000000"           # 16 zeros
+)
+
+
+def _build_r_bytes(screen_w: int, screen_h: int) -> bytes:
+    """Build the r_bytes tail of a stroke record with correct screen dims."""
+    r = bytearray(_R_BYTES_TEMPLATE)
+    struct.pack_into('<I', r, 37, screen_w)
+    struct.pack_into('<I', r, 41, screen_h)
+    return bytes(r)
+
+
+# ---------------------------------------------------------------------------
+# Single stroke builder
+# ---------------------------------------------------------------------------
+
+def _interpolate_contour(
+    points: list[tuple[float, float]], spacing: float = 2.0,
+) -> list[tuple[float, float]]:
+    """Densely interpolate points along a closed polygon at *spacing* px intervals.
+
+    The Supernote firmware expects the vector-points array to contain a dense
+    pen-trajectory (typically 50–2000+ points), *not* just the polygon
+    vertices.  This function walks along each edge of *points* (closing the
+    polygon back to the first vertex) and emits a new sample every *spacing*
+    pixels.
+
+    Returns:
+        A list of ``(x, y)`` floats with many more entries than the input.
+    """
+    import math
+
+    dense: list[tuple[float, float]] = []
+    n = len(points)
+    if n < 2:
+        return list(points)
+
+    for i in range(n):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % n]
+        dx, dy = x1 - x0, y1 - y0
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            dense.append((x0, y0))
+            continue
+        steps = max(1, int(seg_len / spacing))
+        for s in range(steps):
+            t = s / steps
+            dense.append((x0 + dx * t, y0 + dy * t))
+
+    # Ensure we have a reasonable minimum — retry with finer spacing once
+    if len(dense) < 10 and spacing > 0.5:
+        return _interpolate_contour(points, spacing=max(0.5, spacing / 2))
+
+    return dense
+
+
+def _build_stroke(
+    contour_points: list[tuple[float, float]],
+    stroke_nb: int,
+    device: str,
+    screen_w: int,
+    screen_h: int,
+) -> bytes:
+    """Build a single stroke record from contour points.
+
+    Each contour_points entry is ``(x, y)`` in sticker pixel coordinates.
+    The stroke format follows the PySN/snex ``pen_strokes_dict_to_bytes``
+    reference implementation exactly.
+
+    The **vector-points** section is populated with densely interpolated
+    samples along the contour (mimicking a real pen trajectory), while the
+    **contours** section stores the original simplified polygon vertices.
+
+    Args:
+        contour_points: List of (x, y) float coordinates from OpenCV.
+        stroke_nb: Stroke sequence number (1-based).
+        device: Device code key from :data:`DEVICES`.
+        screen_w: Screen width for the target device.
+        screen_h: Screen height for the target device.
+
+    Returns:
+        Complete stroke_data bytes (stroke header + record body).
+    """
+    _p = struct.Struct('<I').pack   # unsigned 32-bit LE
+    _ps = struct.Struct('<i').pack  # signed 32-bit LE
+
+    # Dense vector points for the pen trajectory
+    vector_pts = _interpolate_contour(contour_points, spacing=2.0)
+    n_vec = len(vector_pts)
+
+    # Simplified contour points for the contour section
+    n_contour = len(contour_points)
+
+    # ---- Coordinate scaling ----
+    # The Supernote firmware expects:
+    #   bbox          → sticker pixel coordinates (0..width/height)
+    #   vector points → pen digitizer coordinates (much larger range)
+    # Working stickers (Christmas Dog) show a ~8x scale between the two.
+    # Device info encodes digitizer dims (21632 × 16224 for N5).
+    _VEC_SCALE = 8.0
+    _VEC_OFFSET_X = 15200  # center-ish position on digitizer X axis
+    _VEC_OFFSET_Y = 200    # near top of digitizer Y axis
+
+    # Compute bounding box in sticker pixel space (from original contour points)
+    px_xs = [p[0] for p in contour_points]
+    px_ys = [p[1] for p in contour_points]
+    min_x, max_x = int(min(px_xs)), int(max(px_xs))
+    min_y, max_y = int(min(px_ys)), int(max(px_ys))
+    avg_x = (min_x + max_x) // 2
+    avg_y = (min_y + max_y) // 2
+
+    buf = bytearray()
+
+    # ---- Stroke header (20 bytes) ----
+    buf += struct.pack('B', 10)           # pen_type = 10 (standard)
+    buf += b'\x00\x00\x00'
+    buf += struct.pack('B', 0)            # pen_color = 0 (black)
+    buf += b'\x00\x00\x00'
+    buf += struct.pack('<H', 220)         # pen_weight = 220
+    buf += bytes.fromhex('00000A00000000000000')   # 10 fixed bytes
+
+    # ---- Record body ----
+    # Marker (8 bytes)
+    buf += _MARKER
+    # Page + padding + constants (20 bytes)
+    buf += _PAGE_CONST
+    # Tool name (52 bytes)
+    buf += _TOOL_NAME
+
+    # Bounding box (6 × i32 = 24 bytes) — sticker pixel space
+    buf += _ps(min_x)
+    buf += _ps(min_y)
+    buf += _ps(avg_x)
+    buf += _ps(avg_y)
+    buf += _ps(max_x)
+    buf += _ps(max_y)
+
+    # Device info (12 bytes)
+    buf += _DEVICE_INFO_N5 if device in ('N5',) else _DEVICE_INFO_OTHER
+    # Annotation (52 bytes)
+    buf += _ANNOTATION
+    # Flags (24 bytes)
+    buf += _FLAGS
+
+    # ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
+    buf += _p(n_vec)
+    for x, y in vector_pts:
+        digi_x = int(x * _VEC_SCALE + _VEC_OFFSET_X)
+        digi_y = int(y * _VEC_SCALE + _VEC_OFFSET_Y)
+        buf += _ps(digi_y)   # y stored first
+        buf += _ps(digi_x)   # x stored second
+
+    # ---- Pressure (u16 per point) ----
+    buf += _p(n_vec)
+    for _ in range(n_vec):
+        buf += struct.pack('<H', 1000)    # default pressure
+
+    # ---- Unique (u32 per point, all same value) ----
+    buf += _p(n_vec)
+    for _ in range(n_vec):
+        buf += _p(1)
+
+    # ---- One (u8 per point, all 1) ----
+    buf += _p(n_vec)
+    buf += b'\x01' * n_vec
+
+    # ---- 16 bytes (12 zeros + 0x61000000) ----
+    # Byte 12 must be 0x61 — verified in both Christmas Dog and Stocking.
+    buf += b'\x00' * 12 + bytes.fromhex('61000000')
+
+    # ---- Stroke number (u32) ----
+    buf += _p(stroke_nb)
+
+    # ---- 54 fixed bytes ----
+    buf += _POST_STROKE_NB
+
+    # ---- Contours section ----
+    # 1 contour containing the simplified polygon vertices
+    buf += _p(1)                          # contours_count = 1
+
+    # Point count + custom IEEE 754 encoded (x, y) pairs
+    buf += _p(n_contour)
+    for x, y in contour_points:
+        buf += _decimal_to_custom_ieee754(float(x))
+        buf += _decimal_to_custom_ieee754(float(y))
+
+    # Second contours_count (footer repeat)
+    buf += _p(1)
+
+    # ---- r_bytes (118 bytes with screen dims) ----
+    buf += _build_r_bytes(screen_w, screen_h)
+
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# Trails builder (OpenCV contour-based)
+# ---------------------------------------------------------------------------
+
+def _pixels_to_binary_mask(
+    pixels: list[int], width: int, height: int,
+) -> np.ndarray:
+    """Convert Supernote colour codes to a binary mask for contour detection.
+
+    Any non-background pixel becomes white (255) in the mask.
+    """
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for i, code in enumerate(pixels):
+        if code != COLORCODE_BACKGROUND:
+            mask[i // width, i % width] = 255
+    return mask
+
+
+def _extract_scanline_runs(
+    mask: np.ndarray, step: int = 3,
+) -> list[list[tuple[float, float]]]:
+    """Generate horizontal scan-line fill rectangles from a binary mask.
+
+    Every *step* rows, scan for horizontal runs of white pixels and emit a
+    small rectangle (``step`` pixels tall) for each run.  This produces the
+    many small fill strokes that the Supernote firmware needs to render
+    sticker content visibly (outline contours alone are too thin).
+
+    Args:
+        mask:  Binary image (0/255) with sticker content in white.
+        step:  Row stride between scan lines.
+
+    Returns:
+        List of 4-point rectangles ``[(x0,y0), (x1,y0), (x1,y1), (x0,y1)]``
+        in **pixel** coordinates (not yet flipped or scaled).
+    """
+    h, w = mask.shape
+    runs: list[list[tuple[float, float]]] = []
+    for y in range(0, h, step):
+        row = mask[y]
+        x = 0
+        while x < w:
+            if row[x] == 0:
+                x += 1
+                continue
+            x_start = x
+            while x < w and row[x] != 0:
+                x += 1
+            x_end = x - 1
+            if x_end - x_start < 2:
+                continue
+            half = min(step // 2, 1)
+            y_top = max(0, y - half)
+            y_bot = min(h - 1, y + half)
+            runs.append([
+                (float(x_start), float(y_top)),
+                (float(x_end), float(y_top)),
+                (float(x_end), float(y_bot)),
+                (float(x_start), float(y_bot)),
+            ])
+    return runs
+
+
+def build_trails(
+    pixels: list[int], width: int, height: int, device: str = "N5",
+) -> bytes:
+    """Build the trails section using outline contours and scan-line fill.
+
+    The Supernote firmware requires dense fill strokes to render sticker
+    content visibly — outline contours alone are too thin.  This function
+    combines OpenCV external contours (for shape edges) with horizontal
+    scan-line fill rectangles (for interior shading).
+
+    All X coordinates are mirrored because the firmware renders trails
+    with X flipped relative to OpenCV's top-left-origin coordinate system.
 
     The trails binary format (TOTALPATH) is::
 
@@ -171,104 +523,87 @@ def build_trails(pixels: list[int], width: int, height: int, device: str = "N5")
             [u32 stroke_byte_size]
             [stroke_data bytes ...]
 
-    Each stroke_data begins with a 20-byte header (pen type, colour,
-    weight, and fixed constants) followed by the record body (marker,
-    tool name, bounding box, annotation, coordinates, timing, pressure,
-    pen-type array, per-stroke metadata, contours, and footer with
-    screen dimensions).
-
     Args:
-        pixels: Supernote colour codes (row-major, length = *width* x *height*).
+        pixels: Supernote colour codes (row-major, length = *width* × *height*).
         width:  Sticker width in pixels.
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
 
     Returns:
         Raw bytes for the trails block (**excluding** the leading uint32
-        length prefix -- the caller wraps it).
+        length prefix — the caller wraps it).
     """
     _pack_u32 = struct.Struct("<I").pack
-
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
-    # ------------------------------------------------------------------
-    # Record body template (536 bytes) — starts at the record marker
-    # ------------------------------------------------------------------
-    # Extracted from record 11 of christmas2025.snstk (Christmas Dog).
-    # Structure (all little-endian):
-    #   Bytes   0-  7: Record marker  (0x20, 0xFFFFFFFF)
-    #   Bytes   8- 11: Page/type      (uint32 = 3)
-    #   Bytes  12- 27: Padding + constants (0, 0, 5000, 0)
-    #   Bytes  28- 79: Tool name      "others" null-padded to 52 bytes
-    #   Bytes  80-115: Bounding box   9 x uint32
-    #   Bytes 116-167: Annotation     "superNoteNote" null-padded to 52 bytes
-    #   Bytes 168-191: Post-annot     uint32(1) + 20 zero bytes
-    #   Bytes 192-195: Coord count    uint32(4)
-    #   Bytes 196-227: Coordinates    4 x (uint32 x, uint32 y) pairs
-    #   Bytes 228-231: Timing count   uint32(4)
-    #   Bytes 232-239: Timing data    4 x uint16 values
-    #   Bytes 240-243: Pressure count uint32(4)
-    #   Bytes 244-259: Pressure data  4 x (uint16, uint16) pairs
-    #   Bytes 260-263: Pen-type count uint32(4)
-    #   Bytes 264-267: Pen-type data  4 x uint8(1)
-    #   Bytes 268-413: Per-stroke metadata + float32 coords + sub-stroke data
-    #   Bytes 414-535: Footer (FF block, double, screen dims, "none" strings)
-    #
-    # Screen width  is at byte offset 455 (uint32 LE)
-    # Screen height is at byte offset 459 (uint32 LE)
-    # ------------------------------------------------------------------
-    _RECORD_BODY_HEX = (
-        "20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000"
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        "810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065"
-        "724e6f74654e6f746500000000000000000000000000000000000000000000000000000000000000"
-        "00000000000000000100000000000000000000000000000000000000000000000400000025050000"
-        "083b000025050000083b0000270500000a3b0000290500000b3b000004000000c000f8004901f400"
-        "04000000540b9001540b9001540bf401f00a58020400000001010101000000000000000000000000"
-        "61000000ec0300000000000000000000000000000000000001000000010000000000000000000000"
-        "0100000001000000000000000000000000000000000101000000080000007a4403438a571b43a06d"
-        "024388241b437463014306e41b431a310143d8b91c43a2ac01434c791d438483024348ac1d43b28d"
-        "0343caec1c4310c0034302171c4301000000ffffffffffffffffffffffffffffffffffffffff4dac"
-        "33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000"
-        "6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000"
-        "00000000dc0000000a00000000000000"
-    )
-    record_body = bytearray(bytes.fromhex(_RECORD_BODY_HEX))
+    # Convert pixels to a binary mask
+    mask = _pixels_to_binary_mask(pixels, width, height)
 
-    # Patch screen dimensions for the target device
-    struct.pack_into("<I", record_body, 455, screen_w)
-    struct.pack_into("<I", record_body, 459, screen_h)
+    # Strategy 1: External contours (shape outlines)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # ------------------------------------------------------------------
-    # Stroke header (20 bytes before the record body)
-    # ------------------------------------------------------------------
-    # The TOTALPATH format wraps each record body with a per-stroke
-    # header containing pen metadata.  Format (observed in all working
-    # stickers and confirmed by PySN/snex source):
-    #
-    #   pen_type   (uint8)  + 3 zero bytes
-    #   pen_color  (uint8)  + 3 zero bytes
-    #   pen_weight (uint16) + 8 fixed bytes (00 00 0A 00 00 00 00 00 00 00)
-    #
-    # The fixed bytes end right before the record marker (0x20 …).
-    # ------------------------------------------------------------------
-    stroke_header = bytearray()
-    stroke_header += struct.pack("B", 10)       # pen_type = 10 (standard)
-    stroke_header += b'\x00\x00\x00'            # padding
-    stroke_header += struct.pack("B", 0)        # pen_color = 0 (black)
-    stroke_header += b'\x00\x00\x00'            # padding
-    stroke_header += struct.pack("<H", 220)     # pen_weight = 220
-    stroke_header += bytes.fromhex('00000A00000000000000')  # 10 fixed bytes
+    # Strategy 2: Scan-line fill strokes (interior fill every 3 pixels)
+    scanline_runs = _extract_scanline_runs(mask, step=3)
 
-    # ------------------------------------------------------------------
-    # Assemble: strokes_count + stroke_size + stroke_data
-    # ------------------------------------------------------------------
-    stroke_data = bytes(stroke_header) + bytes(record_body)
+    all_strokes = bytearray()
+    stroke_nb = 1004
+
+    # -- Outline contour strokes --
+    for contour in (contours or []):
+        # Filter out border-like contours that span the full sticker
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        if bw >= width * 0.9 and bh >= height * 0.9:
+            continue
+
+        epsilon = max(1.0, cv2.arcLength(contour, True) * 0.005)
+        simplified = cv2.approxPolyDP(contour, epsilon, True)
+        points = simplified.reshape(-1, 2).tolist()
+
+        if len(points) < 3:
+            continue
+
+        # Mirror X axis — the firmware renders trails with X inverted.
+        contour_pts = [
+            (float(width - 1 - p[0]), float(p[1]))
+            for p in points
+        ]
+        stroke_data = _build_stroke(
+            contour_pts, stroke_nb, device, screen_w, screen_h,
+        )
+        all_strokes += _pack_u32(len(stroke_data))
+        all_strokes += stroke_data
+        stroke_nb += 1
+
+    # -- Scan-line fill strokes --
+    for run_pts in scanline_runs:
+        # Mirror X axis
+        flipped = [
+            (float(width - 1 - p[0]), float(p[1]))
+            for p in run_pts
+        ]
+        stroke_data = _build_stroke(
+            flipped, stroke_nb, device, screen_w, screen_h,
+        )
+        all_strokes += _pack_u32(len(stroke_data))
+        all_strokes += stroke_data
+        stroke_nb += 1
+
+    num_strokes = stroke_nb - 1004
+    if num_strokes == 0:
+        # Fallback if image is entirely transparent
+        fallback_pts = [
+            (0.0, 0.0), (float(width - 1), 0.0),
+            (float(width - 1), float(height - 1)), (0.0, float(height - 1)),
+        ]
+        stroke_data = _build_stroke(
+            fallback_pts, 1004, device, screen_w, screen_h,
+        )
+        all_strokes = bytearray(_pack_u32(len(stroke_data))) + bytearray(stroke_data)
+        num_strokes = 1
 
     buf = bytearray()
-    buf += _pack_u32(1)                   # strokes_count = 1
-    buf += _pack_u32(len(stroke_data))    # stroke_byte_size
-    buf += stroke_data                    # stroke_data
+    buf += _pack_u32(num_strokes)
+    buf += all_strokes
 
     return bytes(buf)
 
@@ -286,7 +621,6 @@ def _generate_file_id() -> str:
     """
     timestamp = time.strftime("%Y%m%d%H%M%S")
     ms = f"{int(time.time() * 1000) % 1000:03d}"
-    # 15-char mixed-case alphanumeric suffix to match official format
     alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     rng = random.Random(uuid.uuid4().int)
     suffix = "".join(rng.choice(alphabet) for _ in range(15))
@@ -360,6 +694,72 @@ def build_sticker(
 
 
 # ---------------------------------------------------------------------------
+# ZIP metadata patch
+# ---------------------------------------------------------------------------
+# The Supernote firmware's sticker-pack importer is strict about ZIP entry
+# metadata.  Working packs (e.g. christmas2025.snstk) require:
+#   flag_bits      = 0x800  (UTF-8 filename flag)
+#   create_version = 51
+#   external_attr  = 0x81800000
+# Python's zipfile module forcibly resets flag_bits=0 in writestr(), so we
+# patch the real ZIP headers after generation.
+
+_ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034B50
+_ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014B50
+_ZIP_EOCD_SIGNATURE = 0x06054B50
+
+def _find_eocd_offset(data: bytes) -> int:
+    """Return the End of Central Directory offset for a ZIP archive."""
+    max_comment_len = 0xFFFF
+    search_start = max(0, len(data) - (22 + max_comment_len))
+    offset = data.rfind(b"PK\x05\x06", search_start)
+    if offset == -1:
+        raise ValueError("ZIP EOCD record not found")
+    return offset
+
+
+def _patch_zip_flags(data: bytes) -> bytes:
+    """Patch ZIP metadata required by Supernote on actual ZIP headers only."""
+    buf = bytearray(data)
+    eocd_offset = _find_eocd_offset(buf)
+    eocd = struct.unpack_from("<IHHHHIIH", buf, eocd_offset)
+    if eocd[0] != _ZIP_EOCD_SIGNATURE:
+        raise ValueError("Invalid ZIP EOCD signature")
+
+    central_directory_size = eocd[5]
+    central_directory_offset = eocd[6]
+    central_directory_end = central_directory_offset + central_directory_size
+
+    cursor = central_directory_offset
+    while cursor < central_directory_end:
+        signature = struct.unpack_from("<I", buf, cursor)[0]
+        if signature != _ZIP_CENTRAL_DIRECTORY_SIGNATURE:
+            raise ValueError(f"Invalid central directory signature at offset {cursor}")
+
+        struct.pack_into("<H", buf, cursor + 4, 51)  # create_version
+        flags = struct.unpack_from("<H", buf, cursor + 8)[0]
+        struct.pack_into("<H", buf, cursor + 8, flags | 0x800)
+        struct.pack_into("<I", buf, cursor + 38, 0x81800000)
+
+        filename_len, extra_len, comment_len = struct.unpack_from("<HHH", buf, cursor + 28)
+        local_header_offset = struct.unpack_from("<I", buf, cursor + 42)[0]
+
+        local_signature = struct.unpack_from("<I", buf, local_header_offset)[0]
+        if local_signature != _ZIP_LOCAL_FILE_HEADER_SIGNATURE:
+            raise ValueError(
+                f"Invalid local file header signature at offset {local_header_offset}"
+            )
+        flags = struct.unpack_from("<H", buf, local_header_offset + 6)[0]
+        struct.pack_into("<H", buf, local_header_offset + 6, flags | 0x800)
+
+        cursor += 46 + filename_len + extra_len + comment_len
+
+    if cursor != central_directory_end:
+        raise ValueError("Central directory parsing did not end on the expected boundary")
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
 # High-level SNSTK pack builder
 # ---------------------------------------------------------------------------
 
@@ -392,6 +792,16 @@ def build_snstk(
         for name, source in images:
             pixels, w, h = image_to_pixels(source, size)
             sticker_data = build_sticker(pixels, w, h, device)
-            zf.writestr(f"{name}.sticker", sticker_data)
+            entry_name = f"{name}.sticker"
 
-    return buf.getvalue()
+            info = zipfile.ZipInfo(entry_name)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_version = 51
+            info.external_attr = 0x81800000
+            zf.writestr(info, sticker_data)
+
+    # Python's zipfile.writestr() forcibly resets flag_bits to 0.
+    # The Supernote firmware requires flag_bits=0x800 (UTF-8 filename
+    # flag) — packs without it are silently rejected by the device.
+    # Post-process the ZIP bytes to set the correct flags.
+    return _patch_zip_flags(buf.getvalue())

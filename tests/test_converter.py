@@ -205,6 +205,15 @@ class TestBuildSnstk:
         # The rect string "0,0,32,32" (or smaller) should be in the data
         assert b"0,0," in sticker_data
 
+    def test_zip_entry_metadata_matches_supernote_requirements(self):
+        buf = _make_rgba_image(20, 20, (0, 0, 0, 255))
+        result = build_snstk([("ascii_name", buf)])
+        with zipfile.ZipFile(BytesIO(result)) as zf:
+            info = zf.getinfo("ascii_name.sticker")
+        assert info.flag_bits == 0x800
+        assert info.create_version == 51
+        assert info.external_attr == 0x81800000
+
 
 # ---------------------------------------------------------------------------
 # Constants sanity checks
