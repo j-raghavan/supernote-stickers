@@ -50,7 +50,8 @@ const ColourMapper = {
 
 const ImageProcessor = {
   async fileToPixels(file, size = DEFAULT_STICKER_SIZE) {
-    const bitmap = await createImageBitmap(file);
+    // Avoid premultiplied-alpha data loss so transparent pixels stay intact
+    const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' });
     const { width: origW, height: origH } = bitmap;
 
     const scale = Math.min(size / origW, size / origH, 1);
@@ -58,7 +59,7 @@ const ImageProcessor = {
     const h     = Math.max(1, Math.round(origH * scale));
 
     const canvas  = new OffscreenCanvas(w, h);
-    const ctx     = canvas.getContext('2d');
+    const ctx     = canvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(bitmap, 0, 0, w, h);
 
     const { data } = ctx.getImageData(0, 0, w, h);
@@ -307,7 +308,7 @@ const TrailsBuilder = {
    * @param {string} device    Device code
    * @param {number} screenW   Screen width
    * @param {number} screenH   Screen height
-   * @returns {number[]}  Stroke data bytes
+   * @returns {Uint8Array}  Stroke data bytes
    */
   _buildStroke(contourPts, strokeNb, device, screenW, screenH) {
     // Dense vector points for pen trajectory (firmware needs many points)
@@ -405,7 +406,7 @@ const TrailsBuilder = {
     // ---- r_bytes ----
     buf.push(...buildRBytes(screenW, screenH));
 
-    return buf;
+    return new Uint8Array(buf);
   },
 
   /**
@@ -437,9 +438,22 @@ const TrailsBuilder = {
     const hierarchy = new cv.Mat();
     cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    const allStrokes = [];
+    // Collect each stroke as a Uint8Array to avoid giant intermediate arrays
+    const strokeChunks = [];
     let strokeNb = 1004;
     let numStrokes = 0;
+    let totalBytes = 0;
+
+    // Helper: wrap stroke data array with its u32 length prefix
+    const wrapStroke = (dataArr) => {
+      const chunk = new Uint8Array(4 + dataArr.length);
+      new DataView(chunk.buffer).setUint32(0, dataArr.length, true);
+      chunk.set(dataArr, 4);
+      strokeChunks.push(chunk);
+      totalBytes += chunk.length;
+      strokeNb++;
+      numStrokes++;
+    };
 
     for (let c = 0; c < contours.size(); c++) {
       const contour = contours.get(c);
@@ -468,14 +482,7 @@ const TrailsBuilder = {
       }
       simplified.delete();
 
-      const strokeData = this._buildStroke(pts, strokeNb, device, screenW, screenH);
-
-      // Prepend stroke size
-      packU32LE(allStrokes, strokeData.length);
-      for (let j = 0; j < strokeData.length; j++) allStrokes.push(strokeData[j]);
-
-      strokeNb++;
-      numStrokes++;
+      wrapStroke(this._buildStroke(pts, strokeNb, device, screenW, screenH));
     }
 
     // Scan-line fill strokes (interior fill every 3 pixels)
@@ -498,11 +505,7 @@ const TrailsBuilder = {
           [width - 1 - xEnd,   yBot],
           [width - 1 - xStart, yBot],
         ];
-        const runStroke = this._buildStroke(runPts, strokeNb, device, screenW, screenH);
-        packU32LE(allStrokes, runStroke.length);
-        for (let j = 0; j < runStroke.length; j++) allStrokes.push(runStroke[j]);
-        strokeNb++;
-        numStrokes++;
+        wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
       }
     }
 
@@ -514,18 +517,18 @@ const TrailsBuilder = {
     // Fallback if no strokes at all
     if (numStrokes === 0) {
       const fallbackPts = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]];
-      const strokeData = this._buildStroke(fallbackPts, 1004, device, screenW, screenH);
-      allStrokes.length = 0;
-      packU32LE(allStrokes, strokeData.length);
-      for (let j = 0; j < strokeData.length; j++) allStrokes.push(strokeData[j]);
-      numStrokes = 1;
+      wrapStroke(this._buildStroke(fallbackPts, 1004, device, screenW, screenH));
     }
 
-    // TOTALPATH: strokes_count + all strokes
-    const out = new Uint8Array(4 + allStrokes.length);
+    // TOTALPATH: assemble strokes_count + all stroke chunks
+    const out = new Uint8Array(4 + totalBytes);
     const dv = new DataView(out.buffer);
     dv.setUint32(0, numStrokes, true);
-    out.set(allStrokes, 4);
+    let off = 4;
+    for (const chunk of strokeChunks) {
+      out.set(chunk, off);
+      off += chunk.length;
+    }
     return out;
   },
 };
