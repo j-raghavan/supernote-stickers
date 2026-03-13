@@ -163,9 +163,9 @@ def _build_trails(pixels: list[int], width: int, height: int, device: str = "N5"
 
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
-    # Minimal valid record template (536 bytes) from christmas2025.snstk
+    # Record body template (536 bytes) from christmas2025.snstk (record 11).
     # Screen width at byte offset 455, screen height at byte offset 459.
-    _RECORD_TEMPLATE_HEX = (
+    _RECORD_BODY_HEX = (
         "20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000"
         "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065"
@@ -181,23 +181,28 @@ def _build_trails(pixels: list[int], width: int, height: int, device: str = "N5"
         "6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000"
         "00000000dc0000000a00000000000000"
     )
-    record = bytearray(bytes.fromhex(_RECORD_TEMPLATE_HEX))
+    record_body = bytearray(bytes.fromhex(_RECORD_BODY_HEX))
 
     # Patch screen dimensions
-    struct.pack_into("<I", record, 455, screen_w)
-    struct.pack_into("<I", record, 459, screen_h)
+    struct.pack_into("<I", record_body, 455, screen_w)
+    struct.pack_into("<I", record_body, 459, screen_h)
 
-    # Global header (28 bytes)
+    # 20-byte stroke header: pen_type(u8)+pad(3) + color(u8)+pad(3) + weight(u16) + fixed(10)
+    stroke_header = bytearray()
+    stroke_header += struct.pack("B", 10)       # pen_type = 10 (standard)
+    stroke_header += b'\x00\x00\x00'            # padding
+    stroke_header += struct.pack("B", 0)        # pen_color = 0 (black)
+    stroke_header += b'\x00\x00\x00'            # padding
+    stroke_header += struct.pack("<H", 220)     # pen_weight = 220
+    stroke_header += bytes.fromhex('00000A00000000000000')  # 10 fixed bytes
+
+    stroke_data = bytes(stroke_header) + bytes(record_body)
+
+    # TOTALPATH format: strokes_count(u32) + stroke_byte_size(u32) + stroke_data
     buf = bytearray()
-    buf += _pack_u32(1)       # stroke count
-    buf += _pack_u32(4)       # total coords
-    buf += _pack_u32(10)      # constant
-    buf += _pack_u32(0)       # reserved
-    buf += _pack_u32(4)       # secondary value
-    buf += _pack_u32(10)      # constant
-    buf += _pack_u32(0)       # reserved
-
-    buf += record
+    buf += _pack_u32(1)                   # strokes_count = 1
+    buf += _pack_u32(len(stroke_data))    # stroke_byte_size
+    buf += stroke_data
     return bytes(buf)
 
 

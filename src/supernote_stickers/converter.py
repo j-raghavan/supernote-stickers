@@ -161,12 +161,21 @@ def build_trails(pixels: list[int], width: int, height: int, device: str = "N5")
 
     This implementation uses a binary template extracted from a known-working
     sticker (christmas2025.snstk).  The template contains a minimal valid
-    record with 4 coordinate pairs that the firmware can parse successfully.
+    stroke record with 4 coordinate pairs that the firmware can parse.
     Only the screen dimensions are adjusted per target device.
 
-    The trails data does not affect the visual appearance of the sticker
-    (the bitmap handles that) -- it just needs to be structurally valid
-    so the firmware doesn't hang.
+    The trails binary format (TOTALPATH) is::
+
+        [u32 strokes_count]
+        For each stroke:
+            [u32 stroke_byte_size]
+            [stroke_data bytes ...]
+
+    Each stroke_data begins with a 20-byte header (pen type, colour,
+    weight, and fixed constants) followed by the record body (marker,
+    tool name, bounding box, annotation, coordinates, timing, pressure,
+    pen-type array, per-stroke metadata, contours, and footer with
+    screen dimensions).
 
     Args:
         pixels: Supernote colour codes (row-major, length = *width* x *height*).
@@ -183,11 +192,13 @@ def build_trails(pixels: list[int], width: int, height: int, device: str = "N5")
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
     # ------------------------------------------------------------------
-    # Minimal valid record template (536 bytes)
+    # Record body template (536 bytes) — starts at the record marker
     # ------------------------------------------------------------------
     # Extracted from record 11 of christmas2025.snstk (Christmas Dog).
     # Structure (all little-endian):
-    #   Bytes   0- 27: Record marker  (0x20, 0xFFFFFFFF, type=3, pad, 5000, pad)
+    #   Bytes   0-  7: Record marker  (0x20, 0xFFFFFFFF)
+    #   Bytes   8- 11: Page/type      (uint32 = 3)
+    #   Bytes  12- 27: Padding + constants (0, 0, 5000, 0)
     #   Bytes  28- 79: Tool name      "others" null-padded to 52 bytes
     #   Bytes  80-115: Bounding box   9 x uint32
     #   Bytes 116-167: Annotation     "superNoteNote" null-padded to 52 bytes
@@ -206,7 +217,7 @@ def build_trails(pixels: list[int], width: int, height: int, device: str = "N5")
     # Screen width  is at byte offset 455 (uint32 LE)
     # Screen height is at byte offset 459 (uint32 LE)
     # ------------------------------------------------------------------
-    _RECORD_TEMPLATE_HEX = (
+    _RECORD_BODY_HEX = (
         "20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000"
         "00000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065"
@@ -222,25 +233,42 @@ def build_trails(pixels: list[int], width: int, height: int, device: str = "N5")
         "6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000"
         "00000000dc0000000a00000000000000"
     )
-    record = bytearray(bytes.fromhex(_RECORD_TEMPLATE_HEX))
+    record_body = bytearray(bytes.fromhex(_RECORD_BODY_HEX))
 
     # Patch screen dimensions for the target device
-    struct.pack_into("<I", record, 455, screen_w)
-    struct.pack_into("<I", record, 459, screen_h)
+    struct.pack_into("<I", record_body, 455, screen_w)
+    struct.pack_into("<I", record_body, 459, screen_h)
 
     # ------------------------------------------------------------------
-    # Global header (28 bytes)
+    # Stroke header (20 bytes before the record body)
     # ------------------------------------------------------------------
+    # The TOTALPATH format wraps each record body with a per-stroke
+    # header containing pen metadata.  Format (observed in all working
+    # stickers and confirmed by PySN/snex source):
+    #
+    #   pen_type   (uint8)  + 3 zero bytes
+    #   pen_color  (uint8)  + 3 zero bytes
+    #   pen_weight (uint16) + 8 fixed bytes (00 00 0A 00 00 00 00 00 00 00)
+    #
+    # The fixed bytes end right before the record marker (0x20 …).
+    # ------------------------------------------------------------------
+    stroke_header = bytearray()
+    stroke_header += struct.pack("B", 10)       # pen_type = 10 (standard)
+    stroke_header += b'\x00\x00\x00'            # padding
+    stroke_header += struct.pack("B", 0)        # pen_color = 0 (black)
+    stroke_header += b'\x00\x00\x00'            # padding
+    stroke_header += struct.pack("<H", 220)     # pen_weight = 220
+    stroke_header += bytes.fromhex('00000A00000000000000')  # 10 fixed bytes
+
+    # ------------------------------------------------------------------
+    # Assemble: strokes_count + stroke_size + stroke_data
+    # ------------------------------------------------------------------
+    stroke_data = bytes(stroke_header) + bytes(record_body)
+
     buf = bytearray()
-    buf += _pack_u32(1)       # stroke count (1 record)
-    buf += _pack_u32(4)       # total coordinate count in record
-    buf += _pack_u32(10)      # constant (observed in all working stickers)
-    buf += _pack_u32(0)       # reserved
-    buf += _pack_u32(4)       # secondary value
-    buf += _pack_u32(10)      # constant
-    buf += _pack_u32(0)       # reserved
-
-    buf += record
+    buf += _pack_u32(1)                   # strokes_count = 1
+    buf += _pack_u32(len(stroke_data))    # stroke_byte_size
+    buf += stroke_data                    # stroke_data
 
     return bytes(buf)
 

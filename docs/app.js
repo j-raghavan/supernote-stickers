@@ -170,14 +170,14 @@ const TrailsBuilder = {
   },
 
   /**
-   * Minimal valid record template (536 bytes) extracted from a known-working
-   * sticker (record 11 of christmas2025.snstk).  Contains a single stroke
-   * with 4 coordinate pairs that the Supernote firmware can parse.
+   * Record body template (536 bytes) extracted from a known-working sticker
+   * (record 11 of christmas2025.snstk).  Starts at the record marker byte
+   * (0x20).  A 20-byte stroke header is prepended at build time.
    *
-   * Screen width  is at byte offset 455 (uint32 LE).
-   * Screen height is at byte offset 459 (uint32 LE).
+   * Screen width  is at byte offset 455 (uint32 LE within this body).
+   * Screen height is at byte offset 459 (uint32 LE within this body).
    */
-  _RECORD_TEMPLATE_HEX:
+  _RECORD_BODY_HEX:
     '20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000'
     + '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
     + '810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065'
@@ -192,6 +192,12 @@ const TrailsBuilder = {
     + '33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000'
     + '6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000'
     + '00000000dc0000000a00000000000000',
+
+  /**
+   * 20-byte stroke header prepended to the record body.
+   * Format: pen_type(u8)+pad(3) + color(u8)+pad(3) + weight(u16) + fixed(10)
+   */
+  _STROKE_HEADER_HEX: '0a00000000000000dc0000000a00000000000000',
 
   _hexToBytes(hex) {
     const bytes = new Uint8Array(hex.length / 2);
@@ -217,25 +223,27 @@ const TrailsBuilder = {
    * @returns {Uint8Array}
    */
   build(pixels, width, height, device = 'N5') {
-    const record = this._hexToBytes(this._RECORD_TEMPLATE_HEX);
+    const recordBody = this._hexToBytes(this._RECORD_BODY_HEX);
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
-    // Patch screen dimensions in the record template
-    const dv = new DataView(record.buffer);
+    // Patch screen dimensions in the record body
+    const dv = new DataView(recordBody.buffer);
     dv.setUint32(455, screenW, true);
     dv.setUint32(459, screenH, true);
 
-    // Global header (28 bytes): 1 record, fixed metadata
-    const out = [];
-    this._packU32(out, 1);   // stroke count
-    this._packU32(out, 4);   // total coords
-    this._packU32(out, 10);  // constant
-    this._packU32(out, 0);   // reserved
-    this._packU32(out, 4);   // secondary value
-    this._packU32(out, 10);  // constant
-    this._packU32(out, 0);   // reserved
+    // Build stroke header (20 bytes)
+    const strokeHeader = this._hexToBytes(this._STROKE_HEADER_HEX);
 
-    out.push(...record);
+    // Concatenate stroke_header + record_body into stroke_data
+    const strokeData = new Uint8Array(strokeHeader.length + recordBody.length);
+    strokeData.set(strokeHeader, 0);
+    strokeData.set(recordBody, strokeHeader.length);
+
+    // TOTALPATH format: strokes_count(u32) + stroke_byte_size(u32) + stroke_data
+    const out = [];
+    this._packU32(out, 1);                    // strokes_count = 1
+    this._packU32(out, strokeData.length);    // stroke_byte_size
+    out.push(...strokeData);
     return new Uint8Array(out);
   },
 };
