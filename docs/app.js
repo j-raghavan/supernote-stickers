@@ -471,10 +471,8 @@ const TrailsBuilder = {
       const strokeData = this._buildStroke(pts, strokeNb, device, screenW, screenH);
 
       // Prepend stroke size
-      const strokeWithSize = [];
-      packU32LE(strokeWithSize, strokeData.length);
-      strokeWithSize.push(...strokeData);
-      allStrokes.push(...strokeWithSize);
+      packU32LE(allStrokes, strokeData.length);
+      for (let j = 0; j < strokeData.length; j++) allStrokes.push(strokeData[j]);
 
       strokeNb++;
       numStrokes++;
@@ -501,10 +499,8 @@ const TrailsBuilder = {
           [width - 1 - xStart, yBot],
         ];
         const runStroke = this._buildStroke(runPts, strokeNb, device, screenW, screenH);
-        const runWithSize = [];
-        packU32LE(runWithSize, runStroke.length);
-        runWithSize.push(...runStroke);
-        allStrokes.push(...runWithSize);
+        packU32LE(allStrokes, runStroke.length);
+        for (let j = 0; j < runStroke.length; j++) allStrokes.push(runStroke[j]);
         strokeNb++;
         numStrokes++;
       }
@@ -519,19 +515,18 @@ const TrailsBuilder = {
     if (numStrokes === 0) {
       const fallbackPts = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]];
       const strokeData = this._buildStroke(fallbackPts, 1004, device, screenW, screenH);
-      const strokeWithSize = [];
-      packU32LE(strokeWithSize, strokeData.length);
-      strokeWithSize.push(...strokeData);
       allStrokes.length = 0;
-      allStrokes.push(...strokeWithSize);
+      packU32LE(allStrokes, strokeData.length);
+      for (let j = 0; j < strokeData.length; j++) allStrokes.push(strokeData[j]);
       numStrokes = 1;
     }
 
     // TOTALPATH: strokes_count + all strokes
-    const out = [];
-    packU32LE(out, numStrokes);
-    out.push(...allStrokes);
-    return new Uint8Array(out);
+    const out = new Uint8Array(4 + allStrokes.length);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, numStrokes, true);
+    out.set(allStrokes, 4);
+    return out;
   },
 };
 
@@ -582,23 +577,23 @@ const StickerBuilder = {
 
     // --- Section 2 – bitmap ---
     const rle  = RLEEncoder.encode(pixels);
-    const bitmapBlock = [];
-    this._writeU32(bitmapBlock, rle.length);
-    bitmapBlock.push(...rle);
+    const bitmapBlock = new Uint8Array(4 + rle.length);
+    new DataView(bitmapBlock.buffer).setUint32(0, rle.length, true);
+    bitmapBlock.set(rle instanceof Uint8Array ? rle : new Uint8Array(rle), 4);
 
     // --- Section 3 – trails (OpenCV contour-based) ---
     const trailsOffset = bitmapOffset + bitmapBlock.length;
     const trailsData   = await TrailsBuilder.build(pixels, width, height, device);
-    const trailsBlock  = [];
-    this._writeU32(trailsBlock, trailsData.length);
-    trailsBlock.push(...trailsData);
+    const trailsBlock  = new Uint8Array(4 + trailsData.length);
+    new DataView(trailsBlock.buffer).setUint32(0, trailsData.length, true);
+    trailsBlock.set(trailsData, 4);
 
     // --- Section 4 – rect ---
     const rectOffset = trailsOffset + trailsBlock.length;
     const rectStr    = this._str(`0,0,${width},${height}`);
-    const rectBlock  = [];
-    this._writeU32(rectBlock, rectStr.length);
-    rectBlock.push(...rectStr);
+    const rectBlock  = new Uint8Array(4 + rectStr.length);
+    new DataView(rectBlock.buffer).setUint32(0, rectStr.length, true);
+    rectBlock.set(new Uint8Array(rectStr), 4);
 
     // --- Section 5 – footer ---
     const footerOffset = rectOffset + rectBlock.length;
@@ -609,15 +604,25 @@ const StickerBuilder = {
       + `<STICKERROTATION:1000>`
       + `<STICKERTRAILS:${trailsOffset}>`,
     );
-    const footerBlock = [];
-    this._writeU32(footerBlock, footerMeta.length);
-    footerBlock.push(...footerMeta);
-    footerBlock.push(0x74, 0x61, 0x69, 0x6C); // 'tail'
-    this._writeU32(footerBlock, footerOffset);
+    const footerBlock = new Uint8Array(4 + footerMeta.length + 4 + 4);
+    const fbDv = new DataView(footerBlock.buffer);
+    fbDv.setUint32(0, footerMeta.length, true);
+    footerBlock.set(new Uint8Array(footerMeta), 4);
+    const tailOff = 4 + footerMeta.length;
+    footerBlock.set(new Uint8Array([0x74, 0x61, 0x69, 0x6C]), tailOff); // 'tail'
+    fbDv.setUint32(tailOff + 4, footerOffset, true);
 
-    return new Uint8Array([
-      ...header, ...bitmapBlock, ...trailsBlock, ...rectBlock, ...footerBlock,
-    ]);
+    // Concatenate all sections
+    const headerArr = new Uint8Array(header);
+    const total = headerArr.length + bitmapBlock.length + trailsBlock.length + rectBlock.length + footerBlock.length;
+    const result = new Uint8Array(total);
+    let off = 0;
+    result.set(headerArr, off); off += headerArr.length;
+    result.set(bitmapBlock, off); off += bitmapBlock.length;
+    result.set(trailsBlock, off); off += trailsBlock.length;
+    result.set(rectBlock, off); off += rectBlock.length;
+    result.set(footerBlock, off);
+    return result;
   },
 };
 
