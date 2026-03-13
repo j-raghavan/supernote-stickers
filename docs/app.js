@@ -4,8 +4,8 @@
  * Mirrors the Python logic in src/supernote_stickers/converter.py so the
  * GitHub Pages site works with no backend whatsoever.
  *
- * SOLID note: each section below is a self-contained, single-responsibility
- * module expressed as a plain JavaScript object / set of pure functions.
+ * Uses OpenCV.js (WASM) for contour detection to generate proper stroke
+ * data that the Supernote firmware can render.
  */
 
 'use strict';
@@ -29,10 +29,6 @@ const DEFAULT_STICKER_SIZE = 180;
 // ---------------------------------------------------------------------------
 
 const ColourMapper = {
-  /**
-   * @param {number} alpha 0-255
-   * @returns {number} Supernote colour code
-   */
   alphaToColorcode(alpha) {
     if (alpha < 9)   return COLORCODE_BACKGROUND;
     if (alpha > 246) return COLORCODE_BLACK;
@@ -40,13 +36,6 @@ const ColourMapper = {
     return AA_LEVELS[index];
   },
 
-  /**
-   * @param {number} r
-   * @param {number} g
-   * @param {number} b
-   * @param {number} a
-   * @returns {number}
-   */
   rgbaToColorcode(r, g, b, a) {
     if (a === 0) return COLORCODE_BACKGROUND;
     const gray     = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
@@ -60,18 +49,10 @@ const ColourMapper = {
 // ---------------------------------------------------------------------------
 
 const ImageProcessor = {
-  /**
-   * Load a File/Blob and draw it onto an off-screen canvas scaled to `size`.
-   *
-   * @param {File} file
-   * @param {number} size  Maximum dimension in pixels
-   * @returns {Promise<{pixels: Uint8Array, width: number, height: number}>}
-   */
   async fileToPixels(file, size = DEFAULT_STICKER_SIZE) {
     const bitmap = await createImageBitmap(file);
     const { width: origW, height: origH } = bitmap;
 
-    // Scale to fit inside `size × size` preserving aspect ratio
     const scale = Math.min(size / origW, size / origH, 1);
     const w     = Math.max(1, Math.round(origW * scale));
     const h     = Math.max(1, Math.round(origH * scale));
@@ -80,7 +61,7 @@ const ImageProcessor = {
     const ctx     = canvas.getContext('2d');
     ctx.drawImage(bitmap, 0, 0, w, h);
 
-    const { data } = ctx.getImageData(0, 0, w, h);   // RGBA flat array
+    const { data } = ctx.getImageData(0, 0, w, h);
     const pixels   = new Uint8Array(w * h);
 
     for (let i = 0; i < w * h; i++) {
@@ -92,7 +73,7 @@ const ImageProcessor = {
     }
 
     bitmap.close();
-    return { pixels, width: w, height: h };
+    return { pixels, width: w, height: h, imageData: data };
   },
 };
 
@@ -101,10 +82,6 @@ const ImageProcessor = {
 // ---------------------------------------------------------------------------
 
 const RLEEncoder = {
-  /**
-   * @param {Uint8Array} pixels
-   * @returns {Uint8Array}
-   */
   encode(pixels) {
     const result = [];
     let i = 0;
@@ -156,94 +133,404 @@ const RLEEncoder = {
 };
 
 // ---------------------------------------------------------------------------
-// TrailsBuilder – synthesises the trails section the device needs
+// Custom IEEE 754 encoding (Supernote contour coordinates)
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a float as Supernote's custom IEEE 754 format.
+ * Standard LE IEEE 754 single-precision with first two bytes swapped.
+ */
+function decimalToCustomIEEE754(value) {
+  if (value === 0) return [0, 0, 0, 0];
+  const buf = new ArrayBuffer(4);
+  new DataView(buf).setFloat32(0, value, true);  // LE float
+  const std = new Uint8Array(buf);
+  return [std[1], std[0], std[2], std[3]];       // swap bytes 0,1
+}
+
+// ---------------------------------------------------------------------------
+// Binary helpers
+// ---------------------------------------------------------------------------
+
+function packU32LE(arr, val) {
+  arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >>> 24) & 0xFF);
+}
+
+function packI32LE(arr, val) {
+  packU32LE(arr, val | 0);  // force signed interpretation
+}
+
+function packU16LE(arr, val) {
+  arr.push(val & 0xFF, (val >> 8) & 0xFF);
+}
+
+function hexToBytes(hex) {
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.substr(i, 2), 16));
+  }
+  return bytes;
+}
+
+// ---------------------------------------------------------------------------
+// Stroke record binary constants (mirrors converter.py)
+// ---------------------------------------------------------------------------
+
+const DEVICES = {
+  N5:  { screen: [1920, 2560] },
+  A5X: { screen: [1404, 1872] },
+  A6X: { screen: [1404, 1872] },
+};
+
+// Record marker (8 bytes)
+const _MARKER = hexToBytes('20000000ffffffff');
+
+// Page + padding + constants (20 bytes) — page=3 required by firmware
+const _PAGE_CONST = hexToBytes(
+  '03000000' +   // page = 3 (required by firmware)
+  '00000000' +   // padding
+  '00000000' +   // padding
+  '88130000' +   // constant = 5000
+  '00000000'     // padding
+);
+
+// Tool name "others" null-padded to 52 bytes
+const _TOOL_NAME = (() => {
+  const name = [0x6F, 0x74, 0x68, 0x65, 0x72, 0x73];  // "others"
+  return name.concat(new Array(46).fill(0));
+})();
+
+// Device info (12 bytes each) — first byte 0x1a for stickers
+const _DEVICE_INFO_N5    = hexToBytes('1a00000080540000603f0000');
+const _DEVICE_INFO_OTHER = hexToBytes('1a000000cb3d0000582e0000');
+
+// Annotation "superNoteNote" null-padded to 52 bytes
+const _ANNOTATION = (() => {
+  const txt = [0x73,0x75,0x70,0x65,0x72,0x4E,0x6F,0x74,0x65,0x4E,0x6F,0x74,0x65];
+  return txt.concat(new Array(39).fill(0));
+})();
+
+// Flags (24 bytes)
+const _FLAGS = hexToBytes(
+  '01000000000000000000000000000000' +
+  '0000000000000000'
+);
+
+// 54 fixed bytes between stroke_nb and contours_count (last byte = 0x01)
+const _POST_STROKE_NB = hexToBytes(
+  '00000000000000000000000000000000' +
+  '01000000010000000000000000000000' +
+  '01000000010000000000000000000000' +
+  '000000000001'
+);
+
+// r_bytes template (94 bytes) — extracted from working Christmas Dog stroke.
+// Screen width at offset 37, height at offset 41.
+const _R_BYTES_TEMPLATE = hexToBytes(
+  'ffffffffffffffffffffffffffffffffffffffff' +
+  '4dac33dcb771d43f' +
+  '002f0000000000000080070000000a00' +
+  '00000000000004000000' +
+  '6e6f6e65' +
+  '040000006e6f6e65' +
+  '00000000' +
+  '0300000002000000' +
+  '00000000000000000000000000000000'
+);
+
+function buildRBytes(screenW, screenH) {
+  const r = _R_BYTES_TEMPLATE.slice();
+  // Patch screen dims at offsets 37 and 41
+  const dv = new DataView(new Uint8Array(r).buffer);
+  dv.setUint32(37, screenW, true);
+  dv.setUint32(41, screenH, true);
+  return Array.from(new Uint8Array(dv.buffer));
+}
+
+
+// ---------------------------------------------------------------------------
+// TrailsBuilder – OpenCV WASM contour-based stroke generation
 // ---------------------------------------------------------------------------
 
 const TrailsBuilder = {
-  /**
-   * Known device screen dimensions.
-   */
-  DEVICES: {
-    N5:  { screen: [1920, 2560] },
-    A5X: { screen: [1404, 1872] },
-    A6X: { screen: [1404, 1872] },
-  },
+  DEVICES,
 
   /**
-   * Record body template (536 bytes) extracted from a known-working sticker
-   * (record 11 of christmas2025.snstk).  Starts at the record marker byte
-   * (0x20).  A 20-byte stroke header is prepended at build time.
-   *
-   * Screen width  is at byte offset 455 (uint32 LE within this body).
-   * Screen height is at byte offset 459 (uint32 LE within this body).
+   * Densely interpolate points along a closed polygon at ~spacing px intervals.
+   * The Supernote firmware expects vector-points to be a dense pen trajectory.
+   * @param {Array<[number,number]>} points  Polygon vertices
+   * @param {number} spacing  Pixel spacing between samples
+   * @returns {Array<[number,number]>}  Dense point list
    */
-  _RECORD_BODY_HEX:
-    '20000000ffffffff03000000000000000000000088130000000000006f7468657273000000000000'
-    + '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
-    + '810000009b00000026060000f0000000830000009d0000001a00000080540000603f000073757065'
-    + '724e6f74654e6f746500000000000000000000000000000000000000000000000000000000000000'
-    + '00000000000000000100000000000000000000000000000000000000000000000400000025050000'
-    + '083b000025050000083b0000270500000a3b0000290500000b3b000004000000c000f8004901f400'
-    + '04000000540b9001540b9001540bf401f00a58020400000001010101000000000000000000000000'
-    + '61000000ec0300000000000000000000000000000000000001000000010000000000000000000000'
-    + '0100000001000000000000000000000000000000000101000000080000007a4403438a571b43a06d'
-    + '024388241b437463014306e41b431a310143d8b91c43a2ac01434c791d438483024348ac1d43b28d'
-    + '0343caec1c4310c0034302171c4301000000ffffffffffffffffffffffffffffffffffffffff4dac'
-    + '33dcb771d43f002f0000000000000080070000000a00000000000000040000006e6f6e6504000000'
-    + '6e6f6e6500000000030000000200000000000000000000000000000000000000931400000a000000'
-    + '00000000dc0000000a00000000000000',
+  _interpolateContour(points, spacing = 2.0) {
+    const dense = [];
+    const n = points.length;
+    if (n < 2) return points.slice();
 
-  /**
-   * 20-byte stroke header prepended to the record body.
-   * Format: pen_type(u8)+pad(3) + color(u8)+pad(3) + weight(u16) + fixed(10)
-   */
-  _STROKE_HEADER_HEX: '0a00000000000000dc0000000a00000000000000',
-
-  _hexToBytes(hex) {
-    const bytes = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < hex.length; i += 2) {
-      bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = points[i];
+      const [x1, y1] = points[(i + 1) % n];
+      const dx = x1 - x0, dy = y1 - y0;
+      const segLen = Math.hypot(dx, dy);
+      if (segLen < 1e-6) { dense.push([x0, y0]); continue; }
+      const steps = Math.max(1, Math.floor(segLen / spacing));
+      for (let s = 0; s < steps; s++) {
+        const t = s / steps;
+        dense.push([x0 + dx * t, y0 + dy * t]);
+      }
     }
-    return bytes;
-  },
 
-  _packU32(arr, val) {
-    arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF);
+    // Retry with finer spacing if too few points
+    if (dense.length < 10 && spacing > 0.5) {
+      return this._interpolateContour(points, Math.max(0.5, spacing / 2));
+    }
+    return dense;
   },
 
   /**
-   * Build a minimal valid trails section using a binary template from a
-   * known-working sticker.  Only the screen dimensions are adjusted for
-   * the target device.
-   *
-   * @param {Uint8Array} pixels  Row-major colour codes (unused – kept for API compat)
-   * @param {number}     width   Sticker width (unused – kept for API compat)
-   * @param {number}     height  Sticker height (unused – kept for API compat)
-   * @param {string}     device  Device code, e.g. "N5"
-   * @returns {Uint8Array}
+   * Wait for OpenCV.js to be ready.
    */
-  build(pixels, width, height, device = 'N5') {
-    const recordBody = this._hexToBytes(this._RECORD_BODY_HEX);
+  async _waitForCV() {
+    if (typeof cv !== 'undefined' && cv.Mat) return;
+    // Wait for OpenCV WASM to load (max 30 seconds)
+    for (let i = 0; i < 300; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      if (typeof cv !== 'undefined' && cv.Mat) return;
+    }
+    throw new Error('OpenCV.js failed to load. Please refresh the page.');
+  },
+
+  /**
+   * Build a single stroke from contour points.
+   * @param {Array<[number,number]>} contourPts  (x, y) float pairs
+   * @param {number} strokeNb  1-based stroke sequence number
+   * @param {string} device    Device code
+   * @param {number} screenW   Screen width
+   * @param {number} screenH   Screen height
+   * @returns {number[]}  Stroke data bytes
+   */
+  _buildStroke(contourPts, strokeNb, device, screenW, screenH) {
+    // Dense vector points for pen trajectory (firmware needs many points)
+    const vectorPts = this._interpolateContour(contourPts, 2.0);
+    const nVec = vectorPts.length;
+    // Simplified contour points for shape outline
+    const nContour = contourPts.length;
+
+    // Coordinate scaling: bbox in sticker pixel space, vector in digitizer space
+    const VEC_SCALE = 8.0;
+    const VEC_OFFSET_X = 15200;
+    const VEC_OFFSET_Y = 200;
+
+    // Bounding box from original contour points (sticker pixel space)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [x, y] of contourPts) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    minX = Math.floor(minX); minY = Math.floor(minY);
+    maxX = Math.floor(maxX); maxY = Math.floor(maxY);
+    const avgX = (minX + maxX) >> 1;
+    const avgY = (minY + maxY) >> 1;
+
+    const buf = [];
+
+    // ---- Stroke header (20 bytes) ----
+    buf.push(10, 0, 0, 0);       // pen_type=10 + padding
+    buf.push(0, 0, 0, 0);        // pen_color=0 + padding
+    packU16LE(buf, 220);          // pen_weight=220
+    buf.push(...hexToBytes('00000A00000000000000'));   // 10 fixed bytes
+
+    // ---- Record body ----
+    buf.push(..._MARKER);
+    buf.push(..._PAGE_CONST);
+    buf.push(..._TOOL_NAME);
+
+    // Bounding box (6 × i32)
+    packI32LE(buf, minX);
+    packI32LE(buf, minY);
+    packI32LE(buf, avgX);
+    packI32LE(buf, avgY);
+    packI32LE(buf, maxX);
+    packI32LE(buf, maxY);
+
+    // Device info (12 bytes)
+    buf.push(...(device === 'N5' ? _DEVICE_INFO_N5 : _DEVICE_INFO_OTHER));
+    // Annotation (52 bytes)
+    buf.push(..._ANNOTATION);
+    // Flags (24 bytes)
+    buf.push(..._FLAGS);
+
+    // ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
+    packU32LE(buf, nVec);
+    for (const [x, y] of vectorPts) {
+      const digiX = Math.round(x * VEC_SCALE + VEC_OFFSET_X);
+      const digiY = Math.round(y * VEC_SCALE + VEC_OFFSET_Y);
+      packI32LE(buf, digiY);   // y stored first
+      packI32LE(buf, digiX);   // x stored second
+    }
+
+    // ---- Pressure (u16 per point) ----
+    packU32LE(buf, nVec);
+    for (let i = 0; i < nVec; i++) packU16LE(buf, 1000);
+
+    // ---- Unique (u32 per point) ----
+    packU32LE(buf, nVec);
+    for (let i = 0; i < nVec; i++) packU32LE(buf, 1);
+
+    // ---- One (u8 per point) ----
+    packU32LE(buf, nVec);
+    for (let i = 0; i < nVec; i++) buf.push(1);
+
+    // ---- 16 bytes (12 zeros + 0x61000000) ----
+    for (let i = 0; i < 12; i++) buf.push(0);
+    buf.push(0x61, 0x00, 0x00, 0x00);
+
+    // ---- Stroke number ----
+    packU32LE(buf, strokeNb);
+
+    // ---- 54 fixed bytes ----
+    buf.push(..._POST_STROKE_NB);
+
+    // ---- Contours section (simplified polygon vertices) ----
+    packU32LE(buf, 1);           // contours_count = 1
+    packU32LE(buf, nContour);    // point count for this contour
+    for (const [x, y] of contourPts) {
+      buf.push(...decimalToCustomIEEE754(x));
+      buf.push(...decimalToCustomIEEE754(y));
+    }
+    packU32LE(buf, 1);           // second contours_count
+
+    // ---- r_bytes ----
+    buf.push(...buildRBytes(screenW, screenH));
+
+    return buf;
+  },
+
+  /**
+   * Find external contours using OpenCV.js and build a low-count trails block.
+   *
+   * @param {Uint8Array} pixels   Row-major Supernote colour codes
+   * @param {number}     width    Sticker width
+   * @param {number}     height   Sticker height
+   * @param {string}     device   Device code
+   * @returns {Promise<Uint8Array>}
+   */
+  async build(pixels, width, height, device = 'N5') {
+    await this._waitForCV();
+
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
-    // Patch screen dimensions in the record body
-    const dv = new DataView(recordBody.buffer);
-    dv.setUint32(455, screenW, true);
-    dv.setUint32(459, screenH, true);
+    // Convert Supernote colour codes to binary mask
+    const maskData = new Uint8Array(width * height);
+    for (let i = 0; i < pixels.length; i++) {
+      maskData[i] = pixels[i] !== COLORCODE_BACKGROUND ? 255 : 0;
+    }
 
-    // Build stroke header (20 bytes)
-    const strokeHeader = this._hexToBytes(this._STROKE_HEADER_HEX);
+    // Create OpenCV Mat from mask
+    const mask = new cv.Mat(height, width, cv.CV_8UC1);
+    mask.data.set(maskData);
 
-    // Concatenate stroke_header + record_body into stroke_data
-    const strokeData = new Uint8Array(strokeHeader.length + recordBody.length);
-    strokeData.set(strokeHeader, 0);
-    strokeData.set(recordBody, strokeHeader.length);
+    // Find contours
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // TOTALPATH format: strokes_count(u32) + stroke_byte_size(u32) + stroke_data
+    const allStrokes = [];
+    let strokeNb = 1004;
+    let numStrokes = 0;
+
+    for (let c = 0; c < contours.size(); c++) {
+      const contour = contours.get(c);
+
+      // Filter out border-like contours that span the full sticker
+      const bRect = cv.boundingRect(contour);
+      if (bRect.width >= width * 0.9 && bRect.height >= height * 0.9) {
+        continue;
+      }
+
+      // Simplify contour
+      const epsilon = Math.max(1.0, cv.arcLength(contour, true) * 0.005);
+      const simplified = new cv.Mat();
+      cv.approxPolyDP(contour, simplified, epsilon, true);
+
+      const nPts = simplified.rows;
+      if (nPts < 3) {
+        simplified.delete();
+        continue;
+      }
+
+      // Mirror X axis — firmware renders trails with X inverted
+      const pts = [];
+      for (let i = 0; i < nPts; i++) {
+        pts.push([width - 1 - simplified.intAt(i, 0), simplified.intAt(i, 1)]);
+      }
+      simplified.delete();
+
+      const strokeData = this._buildStroke(pts, strokeNb, device, screenW, screenH);
+
+      // Prepend stroke size
+      const strokeWithSize = [];
+      packU32LE(strokeWithSize, strokeData.length);
+      strokeWithSize.push(...strokeData);
+      allStrokes.push(...strokeWithSize);
+
+      strokeNb++;
+      numStrokes++;
+    }
+
+    // Scan-line fill strokes (interior fill every 3 pixels)
+    const step = 3;
+    for (let y = 0; y < height; y += step) {
+      let x = 0;
+      while (x < width) {
+        if (maskData[y * width + x] === 0) { x++; continue; }
+        const xStart = x;
+        while (x < width && maskData[y * width + x] !== 0) x++;
+        const xEnd = x - 1;
+        if (xEnd - xStart < 2) continue;
+        const half = Math.min(Math.floor(step / 2), 1);
+        const yTop = Math.max(0, y - half);
+        const yBot = Math.min(height - 1, y + half);
+        // Mirror X axis
+        const runPts = [
+          [width - 1 - xStart, yTop],
+          [width - 1 - xEnd,   yTop],
+          [width - 1 - xEnd,   yBot],
+          [width - 1 - xStart, yBot],
+        ];
+        const runStroke = this._buildStroke(runPts, strokeNb, device, screenW, screenH);
+        const runWithSize = [];
+        packU32LE(runWithSize, runStroke.length);
+        runWithSize.push(...runStroke);
+        allStrokes.push(...runWithSize);
+        strokeNb++;
+        numStrokes++;
+      }
+    }
+
+    // Clean up OpenCV objects
+    mask.delete();
+    contours.delete();
+    hierarchy.delete();
+
+    // Fallback if no strokes at all
+    if (numStrokes === 0) {
+      const fallbackPts = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]];
+      const strokeData = this._buildStroke(fallbackPts, 1004, device, screenW, screenH);
+      const strokeWithSize = [];
+      packU32LE(strokeWithSize, strokeData.length);
+      strokeWithSize.push(...strokeData);
+      allStrokes.length = 0;
+      allStrokes.push(...strokeWithSize);
+      numStrokes = 1;
+    }
+
+    // TOTALPATH: strokes_count + all strokes
     const out = [];
-    this._packU32(out, 1);                    // strokes_count = 1
-    this._packU32(out, strokeData.length);    // stroke_byte_size
-    out.push(...strokeData);
+    packU32LE(out, numStrokes);
+    out.push(...allStrokes);
     return new Uint8Array(out);
   },
 };
@@ -253,7 +540,6 @@ const TrailsBuilder = {
 // ---------------------------------------------------------------------------
 
 const StickerBuilder = {
-  /** @returns {string}  33-char ID matching official Supernote format. */
   _generateFileId() {
     const now  = new Date();
     const pad  = (n, len = 2) => String(n).padStart(len, '0');
@@ -266,26 +552,13 @@ const StickerBuilder = {
     return `F${ts}${ms}${rand}`;
   },
 
-  /** Encode a string as UTF-8 bytes. @param {string} s @returns {Uint8Array} */
   _str(s) { return new TextEncoder().encode(s); },
 
-  /**
-   * Write a little-endian 32-bit uint into an array at pos.
-   * @param {number[]} arr
-   * @param {number}   val
-   */
   _writeU32(arr, val) {
-    arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF);
+    arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >>> 24) & 0xFF);
   },
 
-  /**
-   * @param {Uint8Array} pixels  Row-major colour codes
-   * @param {number}     width
-   * @param {number}     height
-   * @param {string}     device  e.g. "N5"
-   * @returns {Uint8Array}
-   */
-  build(pixels, width, height, device = 'N5') {
+  async build(pixels, width, height, device = 'N5') {
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -313,9 +586,9 @@ const StickerBuilder = {
     this._writeU32(bitmapBlock, rle.length);
     bitmapBlock.push(...rle);
 
-    // --- Section 3 – trails (required for sticker insertion) ---
+    // --- Section 3 – trails (OpenCV contour-based) ---
     const trailsOffset = bitmapOffset + bitmapBlock.length;
-    const trailsData   = TrailsBuilder.build(pixels, width, height, device);
+    const trailsData   = await TrailsBuilder.build(pixels, width, height, device);
     const trailsBlock  = [];
     this._writeU32(trailsBlock, trailsData.length);
     trailsBlock.push(...trailsData);
@@ -349,29 +622,97 @@ const StickerBuilder = {
 };
 
 // ---------------------------------------------------------------------------
+// ZIP metadata patcher
+// ---------------------------------------------------------------------------
+//
+// The Supernote firmware's sticker-pack importer is strict about ZIP entry
+// metadata.  Working packs use:
+//   flag_bits      = 0x800  (UTF-8 filename flag)
+//   create_version = 51
+//   external_attr  = 0x81800000
+//
+// JSZip does NOT set the UTF-8 flag for ASCII filenames, which causes the
+// device to silently reject the pack.  This function patches the generated
+// ZIP bytes to match the metadata the firmware expects.
+
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const ZIP_EOCD_SIGNATURE = 0x06054b50;
+
+function findEocdOffset(dv) {
+  const minEocdSize = 22;
+  const maxCommentLength = 0xffff;
+  const start = Math.max(0, dv.byteLength - (minEocdSize + maxCommentLength));
+
+  for (let i = dv.byteLength - minEocdSize; i >= start; i--) {
+    if (dv.getUint32(i, true) === ZIP_EOCD_SIGNATURE) {
+      return i;
+    }
+  }
+
+  throw new Error('ZIP EOCD record not found');
+}
+
+function patchZipMetadata(buffer) {
+  const dv = new DataView(buffer);
+  const eocdOffset = findEocdOffset(dv);
+  const centralDirectorySize = dv.getUint32(eocdOffset + 12, true);
+  const centralDirectoryOffset = dv.getUint32(eocdOffset + 16, true);
+  const centralDirectoryEnd = centralDirectoryOffset + centralDirectorySize;
+
+  if (centralDirectoryEnd > dv.byteLength) {
+    throw new Error('Central directory extends beyond ZIP buffer');
+  }
+
+  for (let cursor = centralDirectoryOffset; cursor < centralDirectoryEnd;) {
+    if (dv.getUint32(cursor, true) !== ZIP_CENTRAL_DIRECTORY_SIGNATURE) {
+      throw new Error(`Invalid central directory signature at offset ${cursor}`);
+    }
+
+    dv.setUint16(cursor + 4, 51, true);             // create_version
+    const centralFlags = dv.getUint16(cursor + 8, true);
+    dv.setUint16(cursor + 8, centralFlags | 0x800, true);
+    dv.setUint32(cursor + 38, 0x81800000, true);    // external_attr
+
+    const filenameLength = dv.getUint16(cursor + 28, true);
+    const extraLength = dv.getUint16(cursor + 30, true);
+    const commentLength = dv.getUint16(cursor + 32, true);
+    const localHeaderOffset = dv.getUint32(cursor + 42, true);
+
+    if (dv.getUint32(localHeaderOffset, true) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+      throw new Error(`Invalid local file header signature at offset ${localHeaderOffset}`);
+    }
+
+    const localFlags = dv.getUint16(localHeaderOffset + 6, true);
+    dv.setUint16(localHeaderOffset + 6, localFlags | 0x800, true);
+
+    cursor += 46 + filenameLength + extraLength + commentLength;
+  }
+
+  return buffer;
+}
+
+// ---------------------------------------------------------------------------
 // SnstKBuilder – packs multiple stickers into a ZIP (.snstk)
 // ---------------------------------------------------------------------------
 
 const SnstkBuilder = {
-  /**
-   * @param {Array<{name: string, file: File}>} items
-   * @param {number} size
-   * @param {string} device
-   * @param {function(number):void} onProgress  Called with 0-100
-   * @returns {Promise<Blob>}
-   */
   async build(items, size, device, onProgress = () => {}) {
     const zip = new JSZip();
 
     for (let i = 0; i < items.length; i++) {
       const { name, file } = items[i];
       const { pixels, width, height } = await ImageProcessor.fileToPixels(file, size);
-      const stickerData = StickerBuilder.build(pixels, width, height, device);
+      const stickerData = await StickerBuilder.build(pixels, width, height, device);
       zip.file(`${name}.sticker`, stickerData);
       onProgress(Math.round(((i + 1) / items.length) * 100));
     }
 
-    return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    const buf = await zip.generateAsync({
+      type: 'arraybuffer',
+      compression: 'DEFLATE',
+    });
+    return new Blob([patchZipMetadata(buf)], { type: 'application/octet-stream' });
   },
 };
 
@@ -416,7 +757,7 @@ const UI = {
     this.files.forEach((f, i) => {
       const li = document.createElement('li');
       li.innerHTML =
-        `<span>📄 ${this._esc(f.name)} <em style="color:var(--muted)">(${(f.size / 1024).toFixed(1)} KB)</em></span>`
+        `<span>${this._esc(f.name)} <em style="color:var(--muted)">(${(f.size / 1024).toFixed(1)} KB)</em></span>`
         + `<button class="remove" data-i="${i}" title="Remove" aria-label="Remove ${this._esc(f.name)}">✕</button>`;
       this.fileList.appendChild(li);
     });
@@ -449,7 +790,7 @@ const UI = {
     if (!this.files.length) return;
 
     this.convertBtn.disabled = true;
-    this.setStatus('⏳ Converting…', '');
+    this.setStatus('Loading OpenCV...', '');
     this.setProgress(0);
 
     const items  = this.files.map(f => ({ name: this._stem(f.name), file: f }));
@@ -457,6 +798,10 @@ const UI = {
     const device = this.deviceInput.value;
 
     try {
+      // Ensure OpenCV is loaded before conversion
+      await TrailsBuilder._waitForCV();
+      this.setStatus('Converting...', '');
+
       const blob = await SnstkBuilder.build(items, size, device, pct => this.setProgress(pct));
       const url  = URL.createObjectURL(blob);
       const a    = Object.assign(document.createElement('a'), {
@@ -466,22 +811,20 @@ const UI = {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      this.setStatus(`✅ Done! ${items.length} sticker(s) downloaded.`, 'success');
+      this.setStatus(`Done! ${items.length} sticker(s) downloaded.`, 'success');
     } catch (err) {
       console.error(err);
-      this.setStatus(`❌ Error: ${err.message}`, 'error');
+      this.setStatus(`Error: ${err.message}`, 'error');
     } finally {
       this.convertBtn.disabled = false;
       this.setProgress(null);
     }
   },
 
-  /** Escape HTML to prevent XSS in file name display. */
   _esc(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   },
 
-  /** Return the filename stem (no extension). */
   _stem(name) {
     const dot = name.lastIndexOf('.');
     return dot > 0 ? name.slice(0, dot) : name;

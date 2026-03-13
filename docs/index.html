@@ -10,6 +10,9 @@
   <!-- JSZip for building the ZIP/SNSTK archive in the browser -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
+  <!-- OpenCV.js WASM for contour detection (required for sticker rendering) -->
+  <script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="window._cvReady=true;"></script>
+
   <style>
     :root {
       --bg:      #1a1a2e;
