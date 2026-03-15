@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  supernote-stickers:
+    # Simple port configuration:
+    # - Container always listens on 5000 internally
+    # - Port mapping controls external access
+    # 
+    # Examples:
+    #   Default:  ports: ["5000:5000"]    -> access via localhost:5000
+    #   Custom:   ports: ["30314:5000"]   -> access via localhost:30314
+    #   Set PORT env var to show in logs which external port to use
+    # Use hosted image (no local build needed)
+    image: ghcr.io/mavproductions/supernote-stickers:latest
+    # Uncomment below to build locally instead:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: supernote-stickers
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - PORT=5000  # Optional: helps app log which port to access externally
+    volumes:
+      # Optional: Mount a directory for temporary file handling if needed
+      - /tmp/supernote-stickers:/tmp/supernote-stickers
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  default:
+    name: supernote-stickers-network
+    driver: bridge
