@@ -16,7 +16,6 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -72,12 +71,13 @@ def alpha_to_colorcode(alpha: int) -> int:
 def image_to_pixels(
     source: str | Path | BinaryIO,
     size: int = DEFAULT_STICKER_SIZE,
-) -> tuple[list[int], int, int]:
-    """Load an image and return ``(pixels, width, height)``.
+) -> tuple[list[int], int, int, Image.Image]:
+    """Load an image and return ``(pixels, width, height, pil_image)``.
 
     *source* may be a file path or any file-like object (e.g. a
     ``BytesIO`` from a web upload).  All Pillow-supported formats are
-    accepted.
+    accepted.  The returned *pil_image* is the resized RGBA image used
+    for high-quality trail dithering.
     """
     img = Image.open(source).convert("RGBA")
     img.thumbnail((size, size), Image.LANCZOS)
@@ -94,7 +94,7 @@ def image_to_pixels(
                 ink_alpha = int((255 - gray) * (a / 255))
                 pixels.append(alpha_to_colorcode(ink_alpha))
 
-    return pixels, w, h
+    return pixels, w, h, img
 
 
 # ---------------------------------------------------------------------------
@@ -345,14 +345,17 @@ def _build_stroke(
     # Working stickers (Christmas Dog) show a ~8x scale between the two.
     # Device info encodes digitizer dims (21632 × 16224 for N5).
     _VEC_SCALE = 8.0
-    _VEC_OFFSET_X = 15200  # center-ish position on digitizer X axis
-    _VEC_OFFSET_Y = 200    # near top of digitizer Y axis
+    _VEC_OFFSET_X = 15200
+    _VEC_OFFSET_Y = 200
 
-    # Compute bounding box in sticker pixel space (from original contour points)
+    # Compute bounding box in the SAME digitizer coordinate space as vectors
+    # so the firmware sees consistent coordinates for both.
     px_xs = [p[0] for p in contour_points]
     px_ys = [p[1] for p in contour_points]
-    min_x, max_x = int(min(px_xs)), int(max(px_xs))
-    min_y, max_y = int(min(px_ys)), int(max(px_ys))
+    min_x = int(min(px_xs) * _VEC_SCALE + _VEC_OFFSET_X)
+    max_x = int(max(px_xs) * _VEC_SCALE + _VEC_OFFSET_X)
+    min_y = int(min(px_ys) * _VEC_SCALE + _VEC_OFFSET_Y)
+    max_y = int(max(px_ys) * _VEC_SCALE + _VEC_OFFSET_Y)
     avg_x = (min_x + max_x) // 2
     avg_y = (min_y + max_y) // 2
 
@@ -441,93 +444,128 @@ def _build_stroke(
 
 
 # ---------------------------------------------------------------------------
-# Trails builder (OpenCV contour-based)
+# Trails builder (Floyd-Steinberg dithering + OpenCV contours)
 # ---------------------------------------------------------------------------
 
-def _pixels_to_binary_mask(
+
+def _rgba_image_to_grayscale(img: Image.Image) -> np.ndarray:
+    """Convert a PIL RGBA image directly to grayscale (0=black, 255=white).
+
+    Preserves full 256-level precision — much better for dithering than
+    going through the lossy 17-level Supernote colour codes.
+    """
+    img_rgba = img.convert("RGBA")
+    w, h = img_rgba.size
+    gray = np.full((h, w), 255.0, dtype=np.float64)
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = img_rgba.getpixel((x, y))
+            if a == 0:
+                gray[y, x] = 255.0
+            else:
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                # Blend with white background based on alpha
+                gray[y, x] = lum * (a / 255) + 255 * (1 - a / 255)
+    return gray
+
+
+def _pixels_to_grayscale(
     pixels: list[int], width: int, height: int,
 ) -> np.ndarray:
-    """Convert Supernote colour codes to a binary mask for contour detection.
+    """Convert Supernote colour codes to a grayscale image (0=black, 255=white).
 
-    Any non-background pixel becomes white (255) in the mask.
+    Fallback for when the original PIL image isn't available.
     """
-    mask = np.zeros((height, width), dtype=np.uint8)
+    code_to_gray: dict[int, int] = {COLORCODE_BLACK: 0, COLORCODE_BACKGROUND: 255}
+    for idx, code in enumerate(AA_LEVELS):
+        code_to_gray[code] = int((idx + 1) / (len(AA_LEVELS) + 1) * 255)
+
+    gray = np.full((height, width), 255, dtype=np.float64)
     for i, code in enumerate(pixels):
-        if code != COLORCODE_BACKGROUND:
-            mask[i // width, i % width] = 255
-    return mask
+        gray[i // width, i % width] = code_to_gray.get(code, 255)
+    return gray
 
 
-def _extract_scanline_runs(
-    mask: np.ndarray, step: int = 3,
-) -> list[list[tuple[float, float]]]:
-    """Generate horizontal scan-line fill rectangles from a binary mask.
+def _enhance_contrast(gray: np.ndarray) -> np.ndarray:
+    """Stretch contrast and apply gamma correction for better dithering.
 
-    Every *step* rows, scan for horizontal runs of white pixels and emit a
-    small rectangle (``step`` pixels tall) for each run.  This produces the
-    many small fill strokes that the Supernote firmware needs to render
-    sticker content visibly (outline contours alone are too thin).
-
-    Args:
-        mask:  Binary image (0/255) with sticker content in white.
-        step:  Row stride between scan lines.
-
-    Returns:
-        List of 4-point rectangles ``[(x0,y0), (x1,y0), (x1,y1), (x0,y1)]``
-        in **pixel** coordinates (not yet flipped or scaled).
+    1. Contrast stretch: remap [min, max] of non-white pixels to [0, 255].
+    2. Gamma correction (γ=0.6): darken midtones so that light skin tones
+       and subtle features produce enough black dots after dithering.
     """
-    h, w = mask.shape
-    runs: list[list[tuple[float, float]]] = []
-    for y in range(0, h, step):
-        row = mask[y]
-        x = 0
-        while x < w:
-            if row[x] == 0:
-                x += 1
-                continue
-            x_start = x
-            while x < w and row[x] != 0:
-                x += 1
-            x_end = x - 1
-            if x_end - x_start < 2:
-                continue
-            half = min(step // 2, 1)
-            y_top = max(0, y - half)
-            y_bot = min(h - 1, y + half)
-            runs.append([
-                (float(x_start), float(y_top)),
-                (float(x_end), float(y_top)),
-                (float(x_end), float(y_bot)),
-                (float(x_start), float(y_bot)),
-            ])
-    return runs
+    # Find the value range of non-white pixels (actual content)
+    content_mask = gray < 250
+    if not content_mask.any():
+        return gray
+    lo = float(gray[content_mask].min())
+    hi = float(gray[content_mask].max())
+    if hi - lo < 1:
+        return gray
+
+    # Contrast stretch
+    out = gray.copy()
+    out[content_mask] = (gray[content_mask] - lo) / (hi - lo) * 255.0
+    out = np.clip(out, 0, 255)
+
+    # Gamma correction (< 1 darkens midtones, 0.4 = aggressive)
+    out[content_mask] = 255.0 * (out[content_mask] / 255.0) ** 0.4
+
+    return out
+
+
+def _floyd_steinberg_dither(gray: np.ndarray) -> np.ndarray:
+    """Apply Floyd-Steinberg error-diffusion dithering.
+
+    Takes a float64 grayscale image (0=black, 255=white) and returns a
+    uint8 binary image (0 or 255) that, when viewed at a distance,
+    approximates the original tonal gradation.
+    """
+    h, w = gray.shape
+    img = _enhance_contrast(gray)
+
+    for y in range(h):
+        for x in range(w):
+            old_val = img[y, x]
+            new_val = 0.0 if old_val < 128 else 255.0
+            img[y, x] = new_val
+            err = old_val - new_val
+
+            if x + 1 < w:
+                img[y, x + 1] += err * 7.0 / 16.0
+            if y + 1 < h:
+                if x - 1 >= 0:
+                    img[y + 1, x - 1] += err * 3.0 / 16.0
+                img[y + 1, x] += err * 5.0 / 16.0
+                if x + 1 < w:
+                    img[y + 1, x + 1] += err * 1.0 / 16.0
+
+    return (img < 128).astype(np.uint8) * 255
 
 
 def build_trails(
-    pixels: list[int], width: int, height: int, device: str = "N5",
+    pixels: list[int],
+    width: int,
+    height: int,
+    device: str = "N5",
+    pil_image: Image.Image | None = None,
 ) -> bytes:
-    """Build the trails section using outline contours and scan-line fill.
+    """Build the trails section using scanline fills on dithered bitmap.
 
-    The Supernote firmware requires dense fill strokes to render sticker
-    content visibly — outline contours alone are too thin.  This function
-    combines OpenCV external contours (for shape edges) with horizontal
-    scan-line fill rectangles (for interior shading).
+    Converts the grayscale pixel data to a black-and-white halftone using
+    Floyd-Steinberg error-diffusion dithering, then creates strokes by
+    finding solid horizontal runs of black pixels (scanline fill approach).
+    Each row of the dithered image produces one or more strokes for its
+    black pixel runs, creating a proper newspaper-style halftone pattern.
 
-    All X coordinates are mirrored because the firmware renders trails
-    with X flipped relative to OpenCV's top-left-origin coordinate system.
-
-    The trails binary format (TOTALPATH) is::
-
-        [u32 strokes_count]
-        For each stroke:
-            [u32 stroke_byte_size]
-            [stroke_data bytes ...]
+    When *pil_image* is provided, dithering works directly from the full
+    256-level RGBA data instead of the lossy 17-level colour codes.
 
     Args:
         pixels: Supernote colour codes (row-major, length = *width* × *height*).
         width:  Sticker width in pixels.
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
+        pil_image: Optional PIL RGBA image for high-quality dithering.
 
     Returns:
         Raw bytes for the trails block (**excluding** the leading uint32
@@ -536,57 +574,45 @@ def build_trails(
     _pack_u32 = struct.Struct("<I").pack
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
-    # Convert pixels to a binary mask
-    mask = _pixels_to_binary_mask(pixels, width, height)
+    # Dither from full RGBA data when available (much higher quality)
+    if pil_image is not None:
+        gray = _rgba_image_to_grayscale(pil_image)
+    else:
+        gray = _pixels_to_grayscale(pixels, width, height)
+    dithered = _floyd_steinberg_dither(gray)
 
-    # Strategy 1: External contours (shape outlines)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Strategy 2: Scan-line fill strokes (interior fill every 3 pixels)
-    scanline_runs = _extract_scanline_runs(mask, step=3)
-
+    # Generate scanline fill strokes from dithered mask
+    # dithered is uint8: 0 for black, 255 for white
     all_strokes = bytearray()
     stroke_nb = 1004
 
-    # -- Outline contour strokes --
-    for contour in (contours or []):
-        # Filter out border-like contours that span the full sticker
-        bx, by, bw, bh = cv2.boundingRect(contour)
-        if bw >= width * 0.9 and bh >= height * 0.9:
-            continue
+    for y in range(height):
+        row = dithered[y]
+        x = 0
+        while x < width:
+            if row[x] == 255:  # white pixel, skip
+                x += 1
+                continue
+            x_start = x
+            while x < width and row[x] == 0:  # black pixel
+                x += 1
+            x_end = x - 1
+            if x_end - x_start < 0:
+                continue
 
-        epsilon = max(1.0, cv2.arcLength(contour, True) * 0.005)
-        simplified = cv2.approxPolyDP(contour, epsilon, True)
-        points = simplified.reshape(-1, 2).tolist()
+            # Create rectangle points for this run (pixel space)
+            # Must have non-zero height so firmware renders a filled polygon
+            run_pts = [
+                (float(x_start), float(y)),
+                (float(x_end), float(y)),
+                (float(x_end), float(y + 1)),
+                (float(x_start), float(y + 1)),
+            ]
 
-        if len(points) < 3:
-            continue
-
-        # Mirror X axis — the firmware renders trails with X inverted.
-        contour_pts = [
-            (float(width - 1 - p[0]), float(p[1]))
-            for p in points
-        ]
-        stroke_data = _build_stroke(
-            contour_pts, stroke_nb, device, screen_w, screen_h,
-        )
-        all_strokes += _pack_u32(len(stroke_data))
-        all_strokes += stroke_data
-        stroke_nb += 1
-
-    # -- Scan-line fill strokes --
-    for run_pts in scanline_runs:
-        # Mirror X axis
-        flipped = [
-            (float(width - 1 - p[0]), float(p[1]))
-            for p in run_pts
-        ]
-        stroke_data = _build_stroke(
-            flipped, stroke_nb, device, screen_w, screen_h,
-        )
-        all_strokes += _pack_u32(len(stroke_data))
-        all_strokes += stroke_data
-        stroke_nb += 1
+            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h)
+            all_strokes += _pack_u32(len(stroke_data))
+            all_strokes += stroke_data
+            stroke_nb += 1
 
     num_strokes = stroke_nb - 1004
     if num_strokes == 0:
@@ -632,6 +658,7 @@ def build_sticker(
     width: int,
     height: int,
     device: str = "N5",
+    pil_image: Image.Image | None = None,
 ) -> bytes:
     """Assemble a complete ``.sticker`` binary from pixel data.
 
@@ -640,6 +667,7 @@ def build_sticker(
         width:  Sticker width in pixels.
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
+        pil_image: Optional PIL RGBA image for high-quality trail dithering.
 
     Returns:
         Raw bytes suitable for inclusion in an SNSTK ZIP archive.
@@ -666,7 +694,7 @@ def build_sticker(
 
     # Section 3 – trails (required for sticker insertion)
     trails_offset = bitmap_offset + len(bitmap_block)
-    trails_data = build_trails(pixels, width, height, device)
+    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image)
     trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # Section 4 – sticker rect
@@ -790,8 +818,8 @@ def build_snstk(
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, source in images:
-            pixels, w, h = image_to_pixels(source, size)
-            sticker_data = build_sticker(pixels, w, h, device)
+            pixels, w, h, pil_img = image_to_pixels(source, size)
+            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img)
             entry_name = f"{name}.sticker"
 
             info = zipfile.ZipInfo(entry_name)

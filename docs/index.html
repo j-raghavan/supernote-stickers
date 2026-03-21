@@ -7,203 +7,518 @@
   <meta name="description"
         content="Convert PNG, JPG, and other images to Supernote .snstk sticker packs – runs entirely in your browser." />
 
+  <!-- Google Fonts — clean geometric sans-serif inspired by Supernote's typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
   <!-- JSZip for building the ZIP/SNSTK archive in the browser -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-  <!-- OpenCV.js WASM for contour detection (required for sticker rendering) -->
-  <script async src="https://docs.opencv.org/4.10.0/opencv.js" onload="window._cvReady=true;"></script>
 
   <style>
     :root {
-      --bg:      #1a1a2e;
-      --surface: #16213e;
-      --card:    #0f3460;
-      --accent:  #e94560;
-      --text:    #eaeaea;
-      --muted:   #a0aec0;
-      --green:   #68d391;
-      --red:     #fc8181;
-      --radius:  12px;
+      --bg:         #fafafa;
+      --surface:    #ffffff;
+      --border:     #e8e8e8;
+      --border-hover: #d0d0d0;
+      --accent:     #c0623a;
+      --accent-hover: #a8522e;
+      --accent-light: #fdf4f0;
+      --text:       #1a1a1a;
+      --text-secondary: #6b6b6b;
+      --text-muted: #999999;
+      --green:      #2d8a4e;
+      --green-bg:   #ecfdf3;
+      --red:        #d93025;
+      --red-bg:     #fef2f2;
+      --radius:     12px;
+      --radius-sm:  8px;
+      --shadow-sm:  0 1px 2px rgba(0,0,0,.05);
+      --shadow-md:  0 4px 16px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.04);
+      --shadow-lg:  0 8px 32px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+      --font-sans:  'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --font-mono:  'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+      --transition: 0.2s cubic-bezier(.4,0,.2,1);
     }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-family: var(--font-sans);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 2.5rem 1rem 4rem;
+      padding: 0 1rem 4rem;
       line-height: 1.6;
+      font-size: 15px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
 
-    /* ---------- header ---------- */
-    header { text-align: center; margin-bottom: 2.5rem; }
-    header h1 {
-      font-size: 2.4rem;
+    /* ========== Nav ========== */
+    .nav {
+      width: 100%;
+      max-width: 720px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1.5rem 0;
+      margin-bottom: 1rem;
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .nav-brand svg { flex-shrink: 0; }
+    .nav-brand span {
+      font-weight: 600;
+      font-size: .95rem;
+      letter-spacing: -.01em;
+    }
+    .nav-link {
+      font-size: .875rem;
+      color: var(--text-secondary);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      transition: color var(--transition);
+    }
+    .nav-link:hover { color: var(--text); }
+    .nav-link svg { width: 16px; height: 16px; }
+
+    /* ========== Hero ========== */
+    .hero {
+      text-align: center;
+      max-width: 540px;
+      margin-bottom: 2.5rem;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      background: var(--accent-light);
       color: var(--accent);
-      letter-spacing: 1px;
+      font-size: .8rem;
+      font-weight: 600;
+      padding: .3rem .8rem;
+      border-radius: 999px;
+      margin-bottom: 1.25rem;
+      letter-spacing: .01em;
     }
-    header p { color: var(--muted); margin-top: .5rem; font-size: 1.05rem; }
+    .hero h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -.025em;
+      line-height: 1.2;
+      color: var(--text);
+      margin-bottom: .75rem;
+    }
+    .hero p {
+      color: var(--text-secondary);
+      font-size: 1.05rem;
+      line-height: 1.5;
+    }
+    .hero code {
+      font-family: var(--font-mono);
+      font-size: .9rem;
+      background: var(--accent-light);
+      color: var(--accent);
+      padding: .15em .4em;
+      border-radius: 4px;
+    }
 
-    /* ---------- card ---------- */
+    /* ========== Card ========== */
     .card {
       background: var(--surface);
-      border: 1px solid var(--card);
-      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      border-radius: 16px;
       padding: 2rem;
       width: 100%;
       max-width: 640px;
+      box-shadow: var(--shadow-md);
     }
 
-    /* ---------- drop zone ---------- */
+    /* ========== Drop zone ========== */
     .drop-zone {
-      border: 2px dashed var(--card);
+      border: 2px dashed var(--border);
       border-radius: var(--radius);
-      padding: 2.5rem 1rem;
+      padding: 2.5rem 1.5rem;
       text-align: center;
       cursor: pointer;
-      transition: border-color .2s, background .2s;
+      transition: all var(--transition);
       margin-bottom: 1.5rem;
+      background: var(--bg);
     }
     .drop-zone:hover, .drop-zone.drag-over {
       border-color: var(--accent);
-      background: rgba(233,69,96,.06);
+      background: var(--accent-light);
     }
-    .drop-zone .icon { font-size: 3rem; }
-    .drop-zone p     { margin-top: .6rem; color: var(--muted); }
+    .drop-zone .icon {
+      width: 48px;
+      height: 48px;
+      margin: 0 auto .75rem;
+      background: var(--accent-light);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .drop-zone .icon svg {
+      width: 24px;
+      height: 24px;
+      color: var(--accent);
+    }
+    .drop-zone p {
+      color: var(--text-secondary);
+      font-size: .95rem;
+    }
+    .drop-zone p strong {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .drop-zone .formats {
+      margin-top: .4rem;
+      font-size: .82rem;
+      color: var(--text-muted);
+      letter-spacing: .02em;
+    }
     .drop-zone input { display: none; }
 
-    /* ---------- file list ---------- */
-    .file-list { list-style: none; margin-bottom: 1.5rem; }
+    /* ========== File list ========== */
+    .file-list {
+      list-style: none;
+      margin-bottom: 1.5rem;
+    }
+    .file-list:empty { margin-bottom: 0; }
     .file-list li {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      background: var(--card);
-      border-radius: 8px;
-      padding: .5rem .9rem;
-      margin-bottom: .4rem;
-      font-size: .9rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: .55rem .85rem;
+      margin-bottom: .35rem;
+      font-size: .875rem;
+      transition: border-color var(--transition);
     }
-    .file-list .status-icon { margin-left: .5rem; }
+    .file-list li:hover { border-color: var(--border-hover); }
+    .file-list .file-info {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      min-width: 0;
+    }
+    .file-list .file-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--accent-light);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .file-list .file-icon svg {
+      width: 16px;
+      height: 16px;
+      color: var(--accent);
+    }
+    .file-list .file-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-list .file-size {
+      color: var(--text-muted);
+      font-size: .8rem;
+      margin-left: .25rem;
+    }
     .file-list .remove {
       background: none;
       border: none;
-      color: var(--accent);
+      color: var(--text-muted);
       cursor: pointer;
-      font-size: 1.1rem;
-      padding: 0 .2rem;
+      font-size: 1rem;
+      padding: .2rem .4rem;
+      border-radius: 4px;
+      transition: all var(--transition);
+      line-height: 1;
+    }
+    .file-list .remove:hover {
+      color: var(--red);
+      background: var(--red-bg);
     }
 
-    /* ---------- options row ---------- */
-    .row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-    .field { flex: 1; min-width: 160px; }
-    label { display: block; font-weight: 600; margin-bottom: .3rem; }
-    .hint { font-size: .83rem; color: var(--muted); margin-top: .25rem; }
+    /* ========== Options ========== */
+    .options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 480px) {
+      .options { grid-template-columns: 1fr; }
+    }
+    .field label {
+      display: block;
+      font-weight: 500;
+      font-size: .875rem;
+      margin-bottom: .35rem;
+      color: var(--text);
+    }
+    .hint {
+      font-size: .78rem;
+      color: var(--text-muted);
+      margin-top: .3rem;
+      line-height: 1.4;
+    }
     input[type=number], select {
       width: 100%;
-      padding: .5rem .8rem;
+      padding: .55rem .75rem;
       background: var(--bg);
-      border: 1px solid var(--card);
-      border-radius: 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
       color: var(--text);
-      font-size: .95rem;
+      font-family: var(--font-sans);
+      font-size: .9rem;
+      transition: border-color var(--transition), box-shadow var(--transition);
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    input[type=number]:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(192, 98, 58, .12);
+    }
+    select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%236b6b6b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right .75rem center;
+      padding-right: 2rem;
     }
 
-    /* ---------- button ---------- */
+    /* ========== Button ========== */
     .btn {
-      display: block;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
       width: 100%;
-      padding: .9rem;
+      padding: .85rem 1.25rem;
       background: var(--accent);
       color: #fff;
       border: none;
       border-radius: var(--radius);
-      font-size: 1.05rem;
-      font-weight: 700;
+      font-family: var(--font-sans);
+      font-size: .95rem;
+      font-weight: 600;
       cursor: pointer;
-      transition: opacity .2s;
+      transition: all var(--transition);
+      letter-spacing: .01em;
     }
-    .btn:disabled { opacity: .45; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { opacity: .87; }
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+    .btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+      box-shadow: 0 2px 8px rgba(192, 98, 58, .25);
+      transform: translateY(-1px);
+    }
+    .btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    .btn svg {
+      width: 18px;
+      height: 18px;
+    }
 
-    /* ---------- progress ---------- */
+    /* ========== Progress ========== */
     .progress-wrap {
       margin-top: 1rem;
-      background: var(--card);
+      background: var(--bg);
+      border: 1px solid var(--border);
       border-radius: 999px;
-      height: 8px;
+      height: 6px;
       overflow: hidden;
       display: none;
     }
     .progress-bar {
       height: 100%;
-      background: var(--accent);
+      background: linear-gradient(90deg, var(--accent), var(--accent-hover));
       transition: width .3s ease;
       width: 0%;
+      border-radius: 999px;
     }
 
     #status {
-      margin-top: .9rem;
+      margin-top: .75rem;
       text-align: center;
-      font-size: .95rem;
-      min-height: 1.4rem;
+      font-size: .9rem;
+      min-height: 1.3rem;
+      font-weight: 500;
     }
     .error   { color: var(--red); }
     .success { color: var(--green); }
 
-    /* ---------- disclaimer ---------- */
-    .disclaimer {
-      margin-top: 2rem;
-      background: var(--surface);
-      border-left: 4px solid var(--accent);
-      border-radius: var(--radius);
-      padding: 1.2rem 1.5rem;
-      font-size: .88rem;
-      color: var(--muted);
-      max-width: 640px;
-      width: 100%;
-    }
-    .disclaimer strong { color: var(--text); }
-
-    /* ---------- how-to ---------- */
+    /* ========== How-to ========== */
     .howto {
       margin-top: 2rem;
       max-width: 640px;
       width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.75rem 2rem;
+      box-shadow: var(--shadow-sm);
     }
-    .howto h2 { font-size: 1.1rem; color: var(--accent); margin-bottom: .6rem; }
-    .howto ol { padding-left: 1.3rem; }
-    .howto li { color: var(--muted); margin-bottom: .35rem; font-size: .9rem; }
+    .howto h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: .85rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .howto h2 svg {
+      width: 18px;
+      height: 18px;
+      color: var(--accent);
+    }
+    .howto ol {
+      padding-left: 1.2rem;
+      counter-reset: steps;
+      list-style: none;
+    }
+    .howto li {
+      color: var(--text-secondary);
+      margin-bottom: .5rem;
+      font-size: .9rem;
+      position: relative;
+      padding-left: .4rem;
+      counter-increment: steps;
+    }
+    .howto li::before {
+      content: counter(steps);
+      position: absolute;
+      left: -1.4rem;
+      top: .05rem;
+      width: 1.15rem;
+      height: 1.15rem;
+      background: var(--accent-light);
+      color: var(--accent);
+      font-size: .7rem;
+      font-weight: 700;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .howto code {
+      font-family: var(--font-mono);
+      font-size: .82rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: .1em .35em;
+      border-radius: 4px;
+    }
+    .howto strong { color: var(--text); font-weight: 600; }
 
-    /* ---------- footer ---------- */
+    /* ========== Disclaimer ========== */
+    .disclaimer {
+      margin-top: 1.25rem;
+      max-width: 640px;
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.15rem 1.5rem;
+      font-size: .82rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    .disclaimer strong {
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    /* ========== Footer ========== */
     footer {
       margin-top: 2.5rem;
-      color: var(--muted);
+      color: var(--text-muted);
       font-size: .82rem;
       text-align: center;
     }
-    footer a { color: var(--accent); text-decoration: none; }
+    footer a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: color var(--transition);
+    }
+    footer a:hover { color: var(--accent); }
+
+    /* ========== Subtle animation ========== */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .card, .howto, .disclaimer {
+      animation: fadeIn .5s ease forwards;
+    }
+    .howto { animation-delay: .1s; }
+    .disclaimer { animation-delay: .15s; }
   </style>
 </head>
 <body>
 
-<!-- ===== Header ===== -->
-<header>
-  <h1>📓 Supernote Sticker Converter</h1>
-  <p>Upload images → get a <code>.snstk</code> sticker pack – <strong>runs entirely in your browser</strong></p>
-</header>
+<!-- ===== Nav ===== -->
+<nav class="nav">
+  <a href="#" class="nav-brand">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="28" height="28" rx="7" fill="#c0623a" opacity=".1"/>
+      <path d="M8 9.5h12M8 14h12M8 18.5h8" stroke="#c0623a" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span>Sticker Converter</span>
+  </a>
+  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank" rel="noopener noreferrer" class="nav-link">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</nav>
+
+<!-- ===== Hero ===== -->
+<div class="hero">
+  <div class="hero-badge">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+    Browser-based
+  </div>
+  <h1>Convert images to Supernote stickers</h1>
+  <p>Upload your images and download a ready-to-use <code>.snstk</code> sticker pack. Everything runs locally in your browser.</p>
+</div>
 
 <!-- ===== Main card ===== -->
 <div class="card">
 
   <!-- Drop zone -->
   <div class="drop-zone" id="dropZone" role="button" aria-label="Upload images">
-    <div class="icon" aria-hidden="true">🖼️</div>
-    <p>Drag &amp; drop images here, or <strong>click to browse</strong></p>
-    <p class="hint">PNG · JPG · JPEG · WebP · BMP · GIF · TIFF</p>
+    <div class="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+    </div>
+    <p>Drag & drop images here, or <strong>click to browse</strong></p>
+    <p class="formats">PNG &middot; JPG &middot; WebP &middot; BMP &middot; GIF &middot; TIFF</p>
     <input type="file" id="fileInput" multiple
            accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.tif" />
   </div>
@@ -212,24 +527,31 @@
   <ul class="file-list" id="fileList" aria-live="polite"></ul>
 
   <!-- Options -->
-  <div class="row">
+  <div class="options">
     <div class="field">
       <label for="size">Max dimension (px)</label>
       <input type="number" id="size" value="180" min="32" max="512" step="1" />
-      <p class="hint">Stickers are scaled to fit inside this square.</p>
+      <p class="hint">Stickers are scaled to fit this square.</p>
     </div>
     <div class="field">
       <label for="device">Target device</label>
       <select id="device">
-        <option value="N5" selected>N5 – A5X2 Manta / A6X2 Nomad</option>
-        <option value="A5X">A5X – A5X</option>
-        <option value="A6X">A6X – A6X</option>
+        <option value="N5" selected>A5X2 Manta / A6X2 Nomad</option>
+        <option value="A5X">A5X</option>
+        <option value="A6X">A6X</option>
       </select>
     </div>
   </div>
 
   <!-- Convert button -->
-  <button class="btn" id="convertBtn" disabled>⬇️ Convert &amp; Download</button>
+  <button class="btn" id="convertBtn" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+    Convert &amp; Download
+  </button>
 
   <!-- Progress bar -->
   <div class="progress-wrap" id="progressWrap">
@@ -241,30 +563,32 @@
 
 <!-- ===== How-to ===== -->
 <div class="howto">
-  <h2>📋 How to use your sticker pack</h2>
+  <h2>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    How to use your sticker pack
+  </h2>
   <ol>
     <li>Download the <code>.snstk</code> file above.</li>
-    <li>Connect your Supernote to your computer (USB or Supernote cloud).</li>
+    <li>Connect your Supernote to your computer via USB or Supernote Cloud.</li>
     <li>Copy the file to your Supernote's <strong>EXPORT</strong> folder.</li>
-    <li>On your Supernote, open <strong>Settings › Stickers</strong> and import.</li>
+    <li>On your Supernote, open a Note, tap the <strong>Stickers</strong> button in the toolbar, and import.</li>
   </ol>
 </div>
 
 <!-- ===== Disclaimer ===== -->
 <div class="disclaimer">
-  <strong>⚠️ Disclaimer</strong><br />
-  This tool is an <em>independent fan project</em> created by a Supernote enthusiast
-  who wants to give back to the community. It is <strong>not affiliated with,
-  endorsed by, or officially supported by Ratta Supernote</strong>.
-  Your images are processed <em>entirely in your browser</em> – no files are ever
-  uploaded to any server. Use at your own risk. All product names and trademarks
-  are the property of their respective owners.
+  <strong>Disclaimer</strong> &mdash;
+  This tool is an independent fan project and is <strong>not affiliated with, endorsed by, or officially supported by Ratta Supernote</strong>.
+  Your images are processed entirely in your browser &mdash; nothing is uploaded to any server.
+  All product names and trademarks are the property of their respective owners.
 </div>
 
 <footer>
-  Made with ❤️ for the Supernote community ·
-  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank"
-     rel="noopener noreferrer">View on GitHub</a>
+  Made with care for the Supernote community
 </footer>
 
 <!-- ===== Application JavaScript ===== -->

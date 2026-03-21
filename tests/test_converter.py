@@ -101,7 +101,7 @@ class TestEncodeRle:
 class TestImageToPixels:
     def test_opaque_black_image(self):
         buf = _make_rgba_image(10, 10, (0, 0, 0, 255))
-        pixels, w, h = image_to_pixels(buf, size=10)
+        pixels, w, h, _img = image_to_pixels(buf, size=10)
         assert w == 10
         assert h == 10
         assert len(pixels) == 100
@@ -110,19 +110,19 @@ class TestImageToPixels:
 
     def test_transparent_image(self):
         buf = _make_rgba_image(5, 5, (0, 0, 0, 0))
-        pixels, w, h = image_to_pixels(buf, size=10)
+        pixels, w, h, _img = image_to_pixels(buf, size=10)
         assert all(p == COLORCODE_BACKGROUND for p in pixels)
 
     def test_resize_respects_max_dimension(self):
         buf = _make_rgba_image(200, 100, (0, 0, 0, 255))
-        pixels, w, h = image_to_pixels(buf, size=50)
+        pixels, w, h, _img = image_to_pixels(buf, size=50)
         assert max(w, h) <= 50
 
     def test_accepts_file_path(self, tmp_path: Path):
         img = Image.new("RGBA", (20, 20), (0, 0, 0, 255))
         p = tmp_path / "test.png"
         img.save(p)
-        pixels, w, h = image_to_pixels(p)
+        pixels, w, h, _img = image_to_pixels(p)
         assert len(pixels) == w * h
 
     def test_accepts_jpeg(self):
@@ -130,7 +130,7 @@ class TestImageToPixels:
         buf = BytesIO()
         img.save(buf, format="JPEG")
         buf.seek(0)
-        pixels, w, h = image_to_pixels(buf)
+        pixels, w, h, _img = image_to_pixels(buf)
         assert len(pixels) == w * h
 
 

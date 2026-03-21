@@ -25,6 +25,110 @@ const AA_LEVELS = [
 const DEFAULT_STICKER_SIZE = 180;
 
 // ---------------------------------------------------------------------------
+// Floyd-Steinberg dithering — works directly from RGBA imageData
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert raw RGBA imageData to grayscale Float64Array (0=black, 255=white).
+ * Transparent pixels (a=0) become 255 (white/background).
+ * This skips the lossy Supernote colour-code intermediate step so all
+ * 256 grayscale levels are preserved for high-quality dithering.
+ */
+function rgbaToGrayscale(imageData, width, height) {
+  const gray = new Float64Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    const r = imageData[i * 4];
+    const g = imageData[i * 4 + 1];
+    const b = imageData[i * 4 + 2];
+    const a = imageData[i * 4 + 3];
+    if (a === 0) {
+      gray[i] = 255;
+    } else {
+      // Luminosity grayscale, then factor in alpha
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      // Blend with white background based on alpha
+      gray[i] = lum * (a / 255) + 255 * (1 - a / 255);
+    }
+  }
+  return gray;
+}
+
+/**
+ * Stretch contrast and apply gamma correction for better dithering.
+ * Uses γ=0.4 to darken midtones aggressively so light skin tones and
+ * subtle features produce enough black dots.
+ */
+function enhanceContrast(gray) {
+  const out = Float64Array.from(gray);
+  // Find min/max of non-white pixels (actual content)
+  let lo = 255, hi = 0;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] < 250) {
+      if (out[i] < lo) lo = out[i];
+      if (out[i] > hi) hi = out[i];
+    }
+  }
+  if (hi - lo < 1) return out;
+
+  // Contrast stretch + gamma correction (γ=0.4 darkens midtones)
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] < 250) {
+      let v = (out[i] - lo) / (hi - lo) * 255;
+      v = Math.max(0, Math.min(255, v));
+      out[i] = 255 * Math.pow(v / 255, 0.4);
+    }
+  }
+  return out;
+}
+
+/**
+ * Apply Floyd-Steinberg error-diffusion dithering.
+ * Returns Uint8Array mask (0 or 255) where 255 = black pixel.
+ */
+function floydSteinbergDither(gray) {
+  const width = Math.round(Math.sqrt(gray.length));  // not used, see params version
+  const img = enhanceContrast(gray);
+  return _ditherCore(img);
+}
+
+function floydSteinbergDitherFromRGBA(imageData, width, height) {
+  const gray = rgbaToGrayscale(imageData, width, height);
+  const img = enhanceContrast(gray);
+  return _ditherCore(img, width, height);
+}
+
+function _ditherCore(img, width, height) {
+  if (!width) { width = Math.round(Math.sqrt(img.length)); height = width; }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const oldVal = img[idx];
+      const newVal = oldVal < 128 ? 0 : 255;
+      img[idx] = newVal;
+      const err = oldVal - newVal;
+
+      if (x + 1 < width)
+        img[idx + 1] += err * 7 / 16;
+      if (y + 1 < height) {
+        if (x - 1 >= 0)
+          img[(y + 1) * width + (x - 1)] += err * 3 / 16;
+        img[(y + 1) * width + x] += err * 5 / 16;
+        if (x + 1 < width)
+          img[(y + 1) * width + (x + 1)] += err * 1 / 16;
+      }
+    }
+  }
+
+  // Convert to mask: black pixels (< 128) become 255 in mask
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < img.length; i++) {
+    mask[i] = img[i] < 128 ? 255 : 0;
+  }
+  return mask;
+}
+
+// ---------------------------------------------------------------------------
 // ColourMapper – converts RGBA pixel to a Supernote colour code
 // ---------------------------------------------------------------------------
 
@@ -183,6 +287,7 @@ const DEVICES = {
   A6X: { screen: [1404, 1872] },
 };
 
+
 // Record marker (8 bytes)
 const _MARKER = hexToBytes('20000000ffffffff');
 
@@ -288,21 +393,10 @@ const TrailsBuilder = {
     return dense;
   },
 
-  /**
-   * Wait for OpenCV.js to be ready.
-   */
-  async _waitForCV() {
-    if (typeof cv !== 'undefined' && cv.Mat) return;
-    // Wait for OpenCV WASM to load (max 30 seconds)
-    for (let i = 0; i < 300; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      if (typeof cv !== 'undefined' && cv.Mat) return;
-    }
-    throw new Error('OpenCV.js failed to load. Please refresh the page.');
-  },
 
   /**
    * Build a single stroke from contour points.
+   *
    * @param {Array<[number,number]>} contourPts  (x, y) float pairs
    * @param {number} strokeNb  1-based stroke sequence number
    * @param {string} device    Device code
@@ -322,16 +416,18 @@ const TrailsBuilder = {
     const VEC_OFFSET_X = 15200;
     const VEC_OFFSET_Y = 200;
 
-    // Bounding box from original contour points (sticker pixel space)
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // Bounding box in the SAME digitizer coordinate space as vectors
+    let minPxX = Infinity, minPxY = Infinity, maxPxX = -Infinity, maxPxY = -Infinity;
     for (const [x, y] of contourPts) {
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
+      if (x < minPxX) minPxX = x;
+      if (y < minPxY) minPxY = y;
+      if (x > maxPxX) maxPxX = x;
+      if (y > maxPxY) maxPxY = y;
     }
-    minX = Math.floor(minX); minY = Math.floor(minY);
-    maxX = Math.floor(maxX); maxY = Math.floor(maxY);
+    const minX = Math.floor(minPxX * VEC_SCALE + VEC_OFFSET_X);
+    const minY = Math.floor(minPxY * VEC_SCALE + VEC_OFFSET_Y);
+    const maxX = Math.floor(maxPxX * VEC_SCALE + VEC_OFFSET_X);
+    const maxY = Math.floor(maxPxY * VEC_SCALE + VEC_OFFSET_Y);
     const avgX = (minX + maxX) >> 1;
     const avgY = (minY + maxY) >> 1;
 
@@ -410,41 +506,38 @@ const TrailsBuilder = {
   },
 
   /**
-   * Find external contours using OpenCV.js and build a low-count trails block.
+   * Build trails using Floyd-Steinberg dithering + scanline fills.
    *
-   * @param {Uint8Array} pixels   Row-major Supernote colour codes
+   * @param {Uint8Array} pixels   Row-major Supernote colour codes (for bitmap)
    * @param {number}     width    Sticker width
    * @param {number}     height   Sticker height
    * @param {string}     device   Device code
-   * @returns {Promise<Uint8Array>}
+   * @param {Uint8ClampedArray} imageData  Raw RGBA pixel data for dithering
+   * @returns {Uint8Array}
    */
-  async build(pixels, width, height, device = 'N5') {
-    await this._waitForCV();
-
+  build(pixels, width, height, device = 'N5', imageData = null) {
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
-    // Convert Supernote colour codes to binary mask
-    const maskData = new Uint8Array(width * height);
-    for (let i = 0; i < pixels.length; i++) {
-      maskData[i] = pixels[i] !== COLORCODE_BACKGROUND ? 255 : 0;
+    // Dither directly from RGBA data (full 256-level grayscale precision)
+    let ditheredMask;
+    if (imageData) {
+      ditheredMask = floydSteinbergDitherFromRGBA(imageData, width, height);
+    } else {
+      const gray = new Float64Array(width * height);
+      const codeToGray = new Map([[COLORCODE_BLACK, 0], [COLORCODE_BACKGROUND, 255]]);
+      for (let i = 0; i < AA_LEVELS.length; i++)
+        codeToGray.set(AA_LEVELS[i], Math.round((i + 1) / (AA_LEVELS.length + 1) * 255));
+      for (let i = 0; i < pixels.length; i++)
+        gray[i] = codeToGray.get(pixels[i]) ?? 255;
+      ditheredMask = _ditherCore(enhanceContrast(gray), width, height);
     }
 
-    // Create OpenCV Mat from mask
-    const mask = new cv.Mat(height, width, cv.CV_8UC1);
-    mask.data.set(maskData);
-
-    // Find contours
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    // Collect each stroke as a Uint8Array to avoid giant intermediate arrays
+    // Scanline fill strokes from dithered image
     const strokeChunks = [];
     let strokeNb = 1004;
     let numStrokes = 0;
     let totalBytes = 0;
 
-    // Helper: wrap stroke data array with its u32 length prefix
     const wrapStroke = (dataArr) => {
       const chunk = new Uint8Array(4 + dataArr.length);
       new DataView(chunk.buffer).setUint32(0, dataArr.length, true);
@@ -455,64 +548,24 @@ const TrailsBuilder = {
       numStrokes++;
     };
 
-    for (let c = 0; c < contours.size(); c++) {
-      const contour = contours.get(c);
-
-      // Filter out border-like contours that span the full sticker
-      const bRect = cv.boundingRect(contour);
-      if (bRect.width >= width * 0.9 && bRect.height >= height * 0.9) {
-        continue;
-      }
-
-      // Simplify contour
-      const epsilon = Math.max(1.0, cv.arcLength(contour, true) * 0.005);
-      const simplified = new cv.Mat();
-      cv.approxPolyDP(contour, simplified, epsilon, true);
-
-      const nPts = simplified.rows;
-      if (nPts < 3) {
-        simplified.delete();
-        continue;
-      }
-
-      // Mirror X axis — firmware renders trails with X inverted
-      const pts = [];
-      for (let i = 0; i < nPts; i++) {
-        pts.push([width - 1 - simplified.intAt(i, 0), simplified.intAt(i, 1)]);
-      }
-      simplified.delete();
-
-      wrapStroke(this._buildStroke(pts, strokeNb, device, screenW, screenH));
-    }
-
-    // Scan-line fill strokes (interior fill every 3 pixels)
-    const step = 3;
-    for (let y = 0; y < height; y += step) {
+    for (let y = 0; y < height; y++) {
       let x = 0;
       while (x < width) {
-        if (maskData[y * width + x] === 0) { x++; continue; }
+        if (ditheredMask[y * width + x] === 0) { x++; continue; }  // white, skip
         const xStart = x;
-        while (x < width && maskData[y * width + x] !== 0) x++;
+        while (x < width && ditheredMask[y * width + x] !== 0) x++;  // black run
         const xEnd = x - 1;
-        if (xEnd - xStart < 2) continue;
-        const half = Math.min(Math.floor(step / 2), 1);
-        const yTop = Math.max(0, y - half);
-        const yBot = Math.min(height - 1, y + half);
-        // Mirror X axis
+        if (xEnd < xStart) continue;
+        // Proper rectangle with 1-pixel height (non-degenerate polygon)
         const runPts = [
-          [width - 1 - xStart, yTop],
-          [width - 1 - xEnd,   yTop],
-          [width - 1 - xEnd,   yBot],
-          [width - 1 - xStart, yBot],
+          [xStart, y],
+          [xEnd,   y],
+          [xEnd,   y + 1],
+          [xStart, y + 1],
         ];
         wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
       }
     }
-
-    // Clean up OpenCV objects
-    mask.delete();
-    contours.delete();
-    hierarchy.delete();
 
     // Fallback if no strokes at all
     if (numStrokes === 0) {
@@ -556,7 +609,7 @@ const StickerBuilder = {
     arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >>> 24) & 0xFF);
   },
 
-  async build(pixels, width, height, device = 'N5') {
+  async build(pixels, width, height, device = 'N5', imageData = null) {
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -584,9 +637,9 @@ const StickerBuilder = {
     new DataView(bitmapBlock.buffer).setUint32(0, rle.length, true);
     bitmapBlock.set(rle instanceof Uint8Array ? rle : new Uint8Array(rle), 4);
 
-    // --- Section 3 – trails (OpenCV contour-based) ---
+    // --- Section 3 – trails (Floyd-Steinberg dithered) ---
     const trailsOffset = bitmapOffset + bitmapBlock.length;
-    const trailsData   = await TrailsBuilder.build(pixels, width, height, device);
+    const trailsData   = TrailsBuilder.build(pixels, width, height, device, imageData);
     const trailsBlock  = new Uint8Array(4 + trailsData.length);
     new DataView(trailsBlock.buffer).setUint32(0, trailsData.length, true);
     trailsBlock.set(trailsData, 4);
@@ -632,16 +685,6 @@ const StickerBuilder = {
 // ---------------------------------------------------------------------------
 // ZIP metadata patcher
 // ---------------------------------------------------------------------------
-//
-// The Supernote firmware's sticker-pack importer is strict about ZIP entry
-// metadata.  Working packs use:
-//   flag_bits      = 0x800  (UTF-8 filename flag)
-//   create_version = 51
-//   external_attr  = 0x81800000
-//
-// JSZip does NOT set the UTF-8 flag for ASCII filenames, which causes the
-// device to silently reject the pack.  This function patches the generated
-// ZIP bytes to match the metadata the firmware expects.
 
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
@@ -710,8 +753,8 @@ const SnstkBuilder = {
 
     for (let i = 0; i < items.length; i++) {
       const { name, file } = items[i];
-      const { pixels, width, height } = await ImageProcessor.fileToPixels(file, size);
-      const stickerData = await StickerBuilder.build(pixels, width, height, device);
+      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size);
+      const stickerData = await StickerBuilder.build(pixels, width, height, device, imageData);
       zip.file(`${name}.sticker`, stickerData);
       onProgress(Math.round(((i + 1) / items.length) * 100));
     }
@@ -765,8 +808,14 @@ const UI = {
     this.files.forEach((f, i) => {
       const li = document.createElement('li');
       li.innerHTML =
-        `<span>${this._esc(f.name)} <em style="color:var(--muted)">(${(f.size / 1024).toFixed(1)} KB)</em></span>`
-        + `<button class="remove" data-i="${i}" title="Remove" aria-label="Remove ${this._esc(f.name)}">✕</button>`;
+        `<div class="file-info">`
+        + `<div class="file-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></div>`
+        + `<span class="file-name">${this._esc(f.name)}</span>`
+        + `<span class="file-size">${(f.size / 1024).toFixed(1)} KB</span>`
+        + `</div>`
+        + `<button class="remove" data-i="${i}" title="Remove" aria-label="Remove ${this._esc(f.name)}">`
+        + `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`
+        + `</button>`;
       this.fileList.appendChild(li);
     });
     this.fileList.querySelectorAll('.remove').forEach(btn =>
@@ -798,7 +847,7 @@ const UI = {
     if (!this.files.length) return;
 
     this.convertBtn.disabled = true;
-    this.setStatus('Loading OpenCV...', '');
+    this.setStatus('Converting...', '');
     this.setProgress(0);
 
     const items  = this.files.map(f => ({ name: this._stem(f.name), file: f }));
@@ -806,9 +855,6 @@ const UI = {
     const device = this.deviceInput.value;
 
     try {
-      // Ensure OpenCV is loaded before conversion
-      await TrailsBuilder._waitForCV();
-      this.setStatus('Converting...', '');
 
       const blob = await SnstkBuilder.build(items, size, device, pct => this.setProgress(pct));
       const url  = URL.createObjectURL(blob);
