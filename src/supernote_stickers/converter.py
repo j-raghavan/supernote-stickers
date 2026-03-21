@@ -602,11 +602,12 @@ def build_trails(
 
             # Create rectangle points for this run (pixel space)
             # Must have non-zero height so firmware renders a filled polygon
+            # Mirror X axis — the firmware renders trails with X inverted
             run_pts = [
-                (float(x_start), float(y)),
-                (float(x_end), float(y)),
-                (float(x_end), float(y + 1)),
-                (float(x_start), float(y + 1)),
+                (float(width - 1 - x_start), float(y)),
+                (float(width - 1 - x_end), float(y)),
+                (float(width - 1 - x_end), float(y + 1)),
+                (float(width - 1 - x_start), float(y + 1)),
             ]
 
             stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h)

@@ -557,11 +557,12 @@ const TrailsBuilder = {
         const xEnd = x - 1;
         if (xEnd < xStart) continue;
         // Proper rectangle with 1-pixel height (non-degenerate polygon)
+        // Mirror X axis — the firmware renders trails with X inverted
         const runPts = [
-          [xStart, y],
-          [xEnd,   y],
-          [xEnd,   y + 1],
-          [xStart, y + 1],
+          [width - 1 - xStart, y],
+          [width - 1 - xEnd,   y],
+          [width - 1 - xEnd,   y + 1],
+          [width - 1 - xStart, y + 1],
         ];
         wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
       }
