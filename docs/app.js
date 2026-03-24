@@ -196,7 +196,12 @@ const ImageProcessor = {
       // If fully transparent, keep original dimensions
     }
 
-    const scale = Math.min(size / sw, size / sh, 1);
+    // Scale the trimmed image back to the original canvas size so the
+    // sticker matches the user's intended dimensions.  For images that
+    // were originally larger than size, cap at (size - 10) for margin.
+    const origMaxDim = Math.max(origW, origH);
+    const target = origMaxDim > size ? size - 10 : origMaxDim;
+    const scale = Math.min(target / sw, target / sh);
     const w     = Math.max(1, Math.round(sw * scale));
     const h     = Math.max(1, Math.round(sh * scale));
 

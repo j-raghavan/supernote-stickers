@@ -85,6 +85,7 @@ def image_to_pixels(
     of the sticker area as possible.
     """
     img = Image.open(source).convert("RGBA")
+    orig_max_dim = max(img.size)
 
     if trim:
         bbox = img.getbbox()  # bounding box of non-transparent pixels
@@ -92,18 +93,28 @@ def image_to_pixels(
             img = img.crop(bbox)
         # If bbox is None the image is fully transparent — keep as-is.
 
-    img.thumbnail((size, size), Image.LANCZOS)
+    # Scale the trimmed image back to the original canvas size so the
+    # sticker matches the user's intended dimensions.  For images that
+    # were originally larger than *size*, cap at (size − 10) so there
+    # is a small margin and the content doesn't touch the edges.
+    if orig_max_dim > size:
+        target = size - 10
+    else:
+        target = orig_max_dim
 
-    # Centre the (possibly non-square) image on a size×size canvas so the
-    # bitmap and trail layers are both consistently positioned.  This
-    # ensures the sticker content appears centred when pasted on the
-    # device, matching the reference coordinate system that the fixed
-    # digitiser offsets (15200, 200) were calibrated against.
-    thumb_w, thumb_h = img.size
-    if thumb_w != size or thumb_h != size:
+    trimmed_w, trimmed_h = img.size
+    scale = min(target / trimmed_w, target / trimmed_h)
+    new_w = max(1, round(trimmed_w * scale))
+    new_h = max(1, round(trimmed_h * scale))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Centre on a size×size canvas so the bitmap and trail layers are
+    # consistently positioned, matching the reference coordinate system
+    # that the fixed digitiser offsets (15200, 200) were calibrated against.
+    if new_w != size or new_h != size:
         canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        offset_x = (size - thumb_w) // 2
-        offset_y = (size - thumb_h) // 2
+        offset_x = (size - new_w) // 2
+        offset_y = (size - new_h) // 2
         canvas.paste(img, (offset_x, offset_y))
         img = canvas
 
