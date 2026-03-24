@@ -71,6 +71,7 @@ def alpha_to_colorcode(alpha: int) -> int:
 def image_to_pixels(
     source: str | Path | BinaryIO,
     size: int = DEFAULT_STICKER_SIZE,
+    trim: bool = True,
 ) -> tuple[list[int], int, int, Image.Image]:
     """Load an image and return ``(pixels, width, height, pil_image)``.
 
@@ -78,8 +79,19 @@ def image_to_pixels(
     ``BytesIO`` from a web upload).  All Pillow-supported formats are
     accepted.  The returned *pil_image* is the resized RGBA image used
     for high-quality trail dithering.
+
+    When *trim* is ``True`` (the default), transparent borders are
+    cropped away before resizing so the visible content fills as much
+    of the sticker area as possible.
     """
     img = Image.open(source).convert("RGBA")
+
+    if trim:
+        bbox = img.getbbox()  # bounding box of non-transparent pixels
+        if bbox is not None:
+            img = img.crop(bbox)
+        # If bbox is None the image is fully transparent — keep as-is.
+
     img.thumbnail((size, size), Image.LANCZOS)
     w, h = img.size
 
@@ -796,6 +808,7 @@ def build_snstk(
     images: list[tuple[str, str | Path | BinaryIO]],
     size: int = DEFAULT_STICKER_SIZE,
     device: str = "N5",
+    trim: bool = True,
 ) -> bytes:
     """Build an SNSTK sticker pack and return its raw bytes.
 
@@ -806,6 +819,7 @@ def build_snstk(
                 :func:`image_to_pixels`.
         size:   Maximum sticker dimension in pixels.
         device: Target device code.
+        trim:   Crop transparent borders before resizing (default ``True``).
 
     Returns:
         Raw bytes of the ``.snstk`` archive.
@@ -819,7 +833,7 @@ def build_snstk(
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, source in images:
-            pixels, w, h, pil_img = image_to_pixels(source, size)
+            pixels, w, h, pil_img = image_to_pixels(source, size, trim=trim)
             sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img)
             entry_name = f"{name}.sticker"
 

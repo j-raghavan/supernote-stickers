@@ -306,6 +306,28 @@
       padding-right: 2rem;
     }
 
+    /* ========== Checkbox ========== */
+    .checkbox-field {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      margin-bottom: 1.5rem;
+    }
+    .checkbox-field input[type=checkbox] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .checkbox-field label {
+      display: inline;
+      margin-bottom: 0;
+      font-weight: 500;
+      font-size: .875rem;
+      cursor: pointer;
+    }
+
     /* ========== Button ========== */
     .btn {
       display: flex;
@@ -542,6 +564,15 @@
       </select>
     </div>
   </div>
+
+  <!-- Trim option -->
+  <div class="checkbox-field">
+    <input type="checkbox" id="trim" checked />
+    <label for="trim">Trim transparent borders</label>
+  </div>
+  <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
+    Removes invisible padding around the image so the sticker content fills the available space.
+  </p>
 
   <!-- Convert button -->
   <button class="btn" id="convertBtn" disabled>

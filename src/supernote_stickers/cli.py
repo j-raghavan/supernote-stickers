@@ -59,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(f"{k}={v['name']}" for k, v in DEVICES.items())
         ),
     )
+    parser.add_argument(
+        "--no-trim",
+        action="store_true",
+        default=False,
+        help="Disable automatic trimming of transparent borders",
+    )
 
     args = parser.parse_args(argv)
 
@@ -76,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Target device: {args.device} ({DEVICES[args.device]['name']})")
     print(f"Images: {len(images)}")
 
-    data = build_snstk(images, size=args.size, device=args.device)
+    data = build_snstk(images, size=args.size, device=args.device, trim=not args.no_trim)
     output.write_bytes(data)
 
     print(f"\nDone – {output} ({len(data):,} bytes, {len(images)} sticker(s))")

@@ -153,18 +153,57 @@ const ColourMapper = {
 // ---------------------------------------------------------------------------
 
 const ImageProcessor = {
-  async fileToPixels(file, size = DEFAULT_STICKER_SIZE) {
+  /**
+   * Find the bounding box of non-transparent pixels in an RGBA ImageData.
+   * Returns {sx, sy, sw, sh} or null if the image is fully transparent.
+   */
+  _trimBounds(data, width, height) {
+    let minX = width, minY = height, maxX = -1, maxY = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const a = data[(y * width + x) * 4 + 3];
+        if (a > 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null; // fully transparent
+    return { sx: minX, sy: minY, sw: maxX - minX + 1, sh: maxY - minY + 1 };
+  },
+
+  async fileToPixels(file, size = DEFAULT_STICKER_SIZE, trim = true) {
     // Avoid premultiplied-alpha data loss so transparent pixels stay intact
     const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' });
-    const { width: origW, height: origH } = bitmap;
+    let { width: origW, height: origH } = bitmap;
 
-    const scale = Math.min(size / origW, size / origH, 1);
-    const w     = Math.max(1, Math.round(origW * scale));
-    const h     = Math.max(1, Math.round(origH * scale));
+    // Draw full image to a temp canvas so we can inspect pixels for trimming
+    const tmpCanvas = new OffscreenCanvas(origW, origH);
+    const tmpCtx    = tmpCanvas.getContext('2d', { willReadFrequently: true });
+    tmpCtx.drawImage(bitmap, 0, 0);
+    const fullData = tmpCtx.getImageData(0, 0, origW, origH);
 
+    // Determine source region (trimmed or full)
+    let sx = 0, sy = 0, sw = origW, sh = origH;
+    if (trim) {
+      const bounds = this._trimBounds(fullData.data, origW, origH);
+      if (bounds) {
+        sx = bounds.sx;  sy = bounds.sy;
+        sw = bounds.sw;  sh = bounds.sh;
+      }
+      // If fully transparent, keep original dimensions
+    }
+
+    const scale = Math.min(size / sw, size / sh, 1);
+    const w     = Math.max(1, Math.round(sw * scale));
+    const h     = Math.max(1, Math.round(sh * scale));
+
+    // Draw the (possibly trimmed) region scaled to final size
     const canvas  = new OffscreenCanvas(w, h);
     const ctx     = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0, w, h);
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
 
     const { data } = ctx.getImageData(0, 0, w, h);
     const pixels   = new Uint8Array(w * h);
@@ -749,12 +788,12 @@ function patchZipMetadata(buffer) {
 // ---------------------------------------------------------------------------
 
 const SnstkBuilder = {
-  async build(items, size, device, onProgress = () => {}) {
+  async build(items, size, device, onProgress = () => {}, trim = true) {
     const zip = new JSZip();
 
     for (let i = 0; i < items.length; i++) {
       const { name, file } = items[i];
-      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size);
+      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size, trim);
       const stickerData = await StickerBuilder.build(pixels, width, height, device, imageData);
       zip.file(`${name}.sticker`, stickerData);
       onProgress(Math.round(((i + 1) / items.length) * 100));
@@ -782,6 +821,7 @@ const UI = {
   statusEl:    document.getElementById('status'),
   sizeInput:   document.getElementById('size'),
   deviceInput: document.getElementById('device'),
+  trimInput:   document.getElementById('trim'),
 
   /** @type {File[]} */
   files: [],
@@ -854,10 +894,11 @@ const UI = {
     const items  = this.files.map(f => ({ name: this._stem(f.name), file: f }));
     const size   = Math.max(32, Math.min(512, parseInt(this.sizeInput.value, 10) || DEFAULT_STICKER_SIZE));
     const device = this.deviceInput.value;
+    const trim   = this.trimInput.checked;
 
     try {
 
-      const blob = await SnstkBuilder.build(items, size, device, pct => this.setProgress(pct));
+      const blob = await SnstkBuilder.build(items, size, device, pct => this.setProgress(pct), trim);
       const url  = URL.createObjectURL(blob);
       const a    = Object.assign(document.createElement('a'), {
         href: url, download: 'stickers.snstk',
