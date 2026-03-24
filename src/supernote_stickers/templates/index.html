@@ -88,6 +88,25 @@
       margin-top: .3rem;
     }
 
+    .checkbox-field {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      margin-bottom: 1.5rem;
+    }
+    .checkbox-field input[type=checkbox] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .checkbox-field label {
+      display: inline;
+      margin-bottom: 0;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
     .btn {
       display: block;
       width: 100%;
@@ -174,6 +193,14 @@
       </div>
     </div>
 
+    <div class="checkbox-field">
+      <input type="checkbox" id="trim" checked />
+      <label for="trim">Trim transparent borders</label>
+    </div>
+    <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
+      Removes invisible padding around the image so the sticker content fills the available space.
+    </p>
+
     <button type="submit" class="btn" id="convertBtn" disabled>
       ⬇️ Convert &amp; Download
     </button>
@@ -253,6 +280,7 @@
     selectedFiles.forEach(f => fd.append('files[]', f));
     fd.append('size',   document.getElementById('size').value);
     fd.append('device', document.getElementById('device').value);
+    fd.append('trim',   document.getElementById('trim').checked ? 'true' : 'false');
 
     try {
       const res = await fetch('/convert', { method: 'POST', body: fd });
