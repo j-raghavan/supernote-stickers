@@ -200,15 +200,30 @@ const ImageProcessor = {
     const w     = Math.max(1, Math.round(sw * scale));
     const h     = Math.max(1, Math.round(sh * scale));
 
-    // Draw the (possibly trimmed) region scaled to final size
+    // Draw the (possibly trimmed) region scaled to fit within size×size
     const canvas  = new OffscreenCanvas(w, h);
     const ctx     = canvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
 
-    const { data } = ctx.getImageData(0, 0, w, h);
-    const pixels   = new Uint8Array(w * h);
+    // Centre on a size×size canvas so bitmap and trails are consistently
+    // positioned, matching the reference coordinate system the fixed
+    // digitiser offsets were calibrated against.
+    let finalW = w, finalH = h;
+    let finalCanvas = canvas;
+    if (w !== size || h !== size) {
+      finalCanvas = new OffscreenCanvas(size, size);
+      const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
+      const ox = Math.floor((size - w) / 2);
+      const oy = Math.floor((size - h) / 2);
+      fCtx.drawImage(canvas, ox, oy);
+      finalW = size;
+      finalH = size;
+    }
 
-    for (let i = 0; i < w * h; i++) {
+    const { data } = finalCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH);
+    const pixels   = new Uint8Array(finalW * finalH);
+
+    for (let i = 0; i < finalW * finalH; i++) {
       const r = data[i * 4];
       const g = data[i * 4 + 1];
       const b = data[i * 4 + 2];
@@ -217,7 +232,7 @@ const ImageProcessor = {
     }
 
     bitmap.close();
-    return { pixels, width: w, height: h, imageData: data };
+    return { pixels, width: finalW, height: finalH, imageData: data };
   },
 };
 

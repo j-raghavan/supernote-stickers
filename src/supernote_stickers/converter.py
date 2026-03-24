@@ -93,6 +93,20 @@ def image_to_pixels(
         # If bbox is None the image is fully transparent — keep as-is.
 
     img.thumbnail((size, size), Image.LANCZOS)
+
+    # Centre the (possibly non-square) image on a size×size canvas so the
+    # bitmap and trail layers are both consistently positioned.  This
+    # ensures the sticker content appears centred when pasted on the
+    # device, matching the reference coordinate system that the fixed
+    # digitiser offsets (15200, 200) were calibrated against.
+    thumb_w, thumb_h = img.size
+    if thumb_w != size or thumb_h != size:
+        canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        offset_x = (size - thumb_w) // 2
+        offset_y = (size - thumb_h) // 2
+        canvas.paste(img, (offset_x, offset_y))
+        img = canvas
+
     w, h = img.size
 
     pixels: list[int] = []
