@@ -178,6 +178,7 @@ const ImageProcessor = {
     // Avoid premultiplied-alpha data loss so transparent pixels stay intact
     const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' });
     let { width: origW, height: origH } = bitmap;
+    console.log(`[fileToPixels] original image: ${origW}x${origH}, size=${size}, trim=${trim}`);
 
     // Draw full image to a temp canvas so we can inspect pixels for trimming
     const tmpCanvas = new OffscreenCanvas(origW, origH);
@@ -189,12 +190,14 @@ const ImageProcessor = {
     let sx = 0, sy = 0, sw = origW, sh = origH;
     if (trim) {
       const bounds = this._trimBounds(fullData.data, origW, origH);
+      console.log(`[fileToPixels] trim bounds:`, bounds);
       if (bounds) {
         sx = bounds.sx;  sy = bounds.sy;
         sw = bounds.sw;  sh = bounds.sh;
       }
       // If fully transparent, keep original dimensions
     }
+    console.log(`[fileToPixels] source region: sx=${sx}, sy=${sy}, sw=${sw}, sh=${sh}`);
 
     // Scale the trimmed image back to the original canvas size so the
     // sticker matches the user's intended dimensions.  For images that
@@ -204,6 +207,7 @@ const ImageProcessor = {
     const scale = Math.min(target / sw, target / sh);
     const w     = Math.max(1, Math.round(sw * scale));
     const h     = Math.max(1, Math.round(sh * scale));
+    console.log(`[fileToPixels] origMaxDim=${origMaxDim}, target=${target}, scale=${scale.toFixed(4)}, scaled=${w}x${h}`);
 
     // Draw the (possibly trimmed) region scaled to fit within size×size
     const canvas  = new OffscreenCanvas(w, h);
@@ -220,11 +224,15 @@ const ImageProcessor = {
       const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
       const ox = Math.floor((size - w) / 2);
       const oy = Math.floor((size - h) / 2);
+      console.log(`[fileToPixels] centering: ox=${ox}, oy=${oy}, finalCanvas=${size}x${size}`);
       fCtx.drawImage(canvas, ox, oy);
       finalW = size;
       finalH = size;
+    } else {
+      console.log(`[fileToPixels] no centering needed, already ${w}x${h}`);
     }
 
+    console.log(`[fileToPixels] final output: ${finalW}x${finalH}`);
     const { data } = finalCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH);
     const pixels   = new Uint8Array(finalW * finalH);
 
