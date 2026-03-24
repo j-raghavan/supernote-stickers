@@ -583,6 +583,7 @@ const TrailsBuilder = {
    * @returns {Uint8Array}
    */
   build(pixels, width, height, device = 'N5', imageData = null) {
+    console.log(`[TrailsBuilder.build] width=${width}, height=${height}, pixels.length=${pixels.length}`);
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
     // Dither directly from RGBA data (full 256-level grayscale precision)
@@ -598,6 +599,21 @@ const TrailsBuilder = {
         gray[i] = codeToGray.get(pixels[i]) ?? 255;
       ditheredMask = _ditherCore(enhanceContrast(gray), width, height);
     }
+
+    // Log dithered mask stats — verify centering is reflected
+    let blackCount = 0, firstBlackX = width, firstBlackY = height, lastBlackX = 0, lastBlackY = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (ditheredMask[y * width + x] !== 0) {
+          blackCount++;
+          if (x < firstBlackX) firstBlackX = x;
+          if (x > lastBlackX) lastBlackX = x;
+          if (y < firstBlackY) firstBlackY = y;
+          if (y > lastBlackY) lastBlackY = y;
+        }
+      }
+    }
+    console.log(`[TrailsBuilder.build] dithered: ${blackCount} black pixels, bounds x=[${firstBlackX},${lastBlackX}] y=[${firstBlackY},${lastBlackY}]`);
 
     // Scanline fill strokes from dithered image
     const strokeChunks = [];
@@ -634,6 +650,8 @@ const TrailsBuilder = {
         wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
       }
     }
+
+    console.log(`[TrailsBuilder.build] numStrokes=${numStrokes}`);
 
     // Fallback if no strokes at all
     if (numStrokes === 0) {
@@ -678,6 +696,7 @@ const StickerBuilder = {
   },
 
   async build(pixels, width, height, device = 'N5', imageData = null) {
+    console.log(`[StickerBuilder.build] width=${width}, height=${height}, pixels.length=${pixels.length}, imageData.length=${imageData?.length}`);
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -714,6 +733,7 @@ const StickerBuilder = {
 
     // --- Section 4 – rect ---
     const rectOffset = trailsOffset + trailsBlock.length;
+    console.log(`[StickerBuilder.build] rect: "0,0,${width},${height}"`);
     const rectStr    = this._str(`0,0,${width},${height}`);
     const rectBlock  = new Uint8Array(4 + rectStr.length);
     new DataView(rectBlock.buffer).setUint32(0, rectStr.length, true);
