@@ -178,7 +178,6 @@ const ImageProcessor = {
     // Avoid premultiplied-alpha data loss so transparent pixels stay intact
     const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' });
     let { width: origW, height: origH } = bitmap;
-    console.log(`[fileToPixels] original image: ${origW}x${origH}, size=${size}, trim=${trim}`);
 
     // Draw full image to a temp canvas so we can inspect pixels for trimming
     const tmpCanvas = new OffscreenCanvas(origW, origH);
@@ -190,15 +189,12 @@ const ImageProcessor = {
     let sx = 0, sy = 0, sw = origW, sh = origH;
     if (trim) {
       const bounds = this._trimBounds(fullData.data, origW, origH);
-      console.log(`[fileToPixels] trim bounds:`, bounds);
       if (bounds) {
         sx = bounds.sx;  sy = bounds.sy;
         sw = bounds.sw;  sh = bounds.sh;
       }
       // If fully transparent, keep original dimensions
     }
-    console.log(`[fileToPixels] source region: sx=${sx}, sy=${sy}, sw=${sw}, sh=${sh}`);
-
     // Scale the trimmed image back to the original canvas size so the
     // sticker matches the user's intended dimensions.  For images that
     // were originally larger than size, cap at (size - 10) for margin.
@@ -207,8 +203,6 @@ const ImageProcessor = {
     const scale = Math.min(target / sw, target / sh);
     const w     = Math.max(1, Math.round(sw * scale));
     const h     = Math.max(1, Math.round(sh * scale));
-    console.log(`[fileToPixels] origMaxDim=${origMaxDim}, target=${target}, scale=${scale.toFixed(4)}, scaled=${w}x${h}`);
-
     // Draw the (possibly trimmed) region scaled to fit within size×size
     const canvas  = new OffscreenCanvas(w, h);
     const ctx     = canvas.getContext('2d', { willReadFrequently: true });
@@ -224,15 +218,11 @@ const ImageProcessor = {
       const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
       const ox = Math.floor((size - w) / 2);
       const oy = Math.floor((size - h) / 2);
-      console.log(`[fileToPixels] centering: ox=${ox}, oy=${oy}, finalCanvas=${size}x${size}`);
       fCtx.drawImage(canvas, ox, oy);
       finalW = size;
       finalH = size;
-    } else {
-      console.log(`[fileToPixels] no centering needed, already ${w}x${h}`);
     }
 
-    console.log(`[fileToPixels] final output: ${finalW}x${finalH}`);
     const { data } = finalCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH);
     const pixels   = new Uint8Array(finalW * finalH);
 
@@ -583,7 +573,6 @@ const TrailsBuilder = {
    * @returns {Uint8Array}
    */
   build(pixels, width, height, device = 'N5', imageData = null) {
-    console.log(`[TrailsBuilder.build] width=${width}, height=${height}, pixels.length=${pixels.length}`);
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
     // Dither directly from RGBA data (full 256-level grayscale precision)
@@ -599,21 +588,6 @@ const TrailsBuilder = {
         gray[i] = codeToGray.get(pixels[i]) ?? 255;
       ditheredMask = _ditherCore(enhanceContrast(gray), width, height);
     }
-
-    // Log dithered mask stats — verify centering is reflected
-    let blackCount = 0, firstBlackX = width, firstBlackY = height, lastBlackX = 0, lastBlackY = 0;
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (ditheredMask[y * width + x] !== 0) {
-          blackCount++;
-          if (x < firstBlackX) firstBlackX = x;
-          if (x > lastBlackX) lastBlackX = x;
-          if (y < firstBlackY) firstBlackY = y;
-          if (y > lastBlackY) lastBlackY = y;
-        }
-      }
-    }
-    console.log(`[TrailsBuilder.build] dithered: ${blackCount} black pixels, bounds x=[${firstBlackX},${lastBlackX}] y=[${firstBlackY},${lastBlackY}]`);
 
     // Scanline fill strokes from dithered image
     const strokeChunks = [];
@@ -650,8 +624,6 @@ const TrailsBuilder = {
         wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
       }
     }
-
-    console.log(`[TrailsBuilder.build] numStrokes=${numStrokes}`);
 
     // Fallback if no strokes at all
     if (numStrokes === 0) {
@@ -696,7 +668,6 @@ const StickerBuilder = {
   },
 
   async build(pixels, width, height, device = 'N5', imageData = null) {
-    console.log(`[StickerBuilder.build] width=${width}, height=${height}, pixels.length=${pixels.length}, imageData.length=${imageData?.length}`);
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -733,7 +704,6 @@ const StickerBuilder = {
 
     // --- Section 4 – rect ---
     const rectOffset = trailsOffset + trailsBlock.length;
-    console.log(`[StickerBuilder.build] rect: "0,0,${width},${height}"`);
     const rectStr    = this._str(`0,0,${width},${height}`);
     const rectBlock  = new Uint8Array(4 + rectStr.length);
     new DataView(rectBlock.buffer).setUint32(0, rectStr.length, true);

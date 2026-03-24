@@ -576,7 +576,10 @@ def _floyd_steinberg_dither(gray: np.ndarray) -> np.ndarray:
                 if x + 1 < w:
                     img[y + 1, x + 1] += err * 1.0 / 16.0
 
-    return (img < 128).astype(np.uint8) * 255
+    # Standard grayscale convention: 0 = black, 255 = white.
+    # After the quantisation loop every pixel is exactly 0.0 or 255.0,
+    # so this simply converts float64 → uint8 while preserving the values.
+    return (img >= 128).astype(np.uint8) * 255
 
 
 def build_trails(
@@ -618,8 +621,10 @@ def build_trails(
         gray = _pixels_to_grayscale(pixels, width, height)
     dithered = _floyd_steinberg_dither(gray)
 
-    # Generate scanline fill strokes from dithered mask
-    # dithered is uint8: 0 for black, 255 for white
+    # Generate scanline fill strokes from dithered mask.
+    # dithered is uint8 with standard grayscale convention:
+    #   0   = black (content)  → generate strokes
+    #   255 = white (background) → skip
     all_strokes = bytearray()
     stroke_nb = 1004
 
@@ -627,11 +632,11 @@ def build_trails(
         row = dithered[y]
         x = 0
         while x < width:
-            if row[x] == 255:  # white pixel, skip
+            if row[x] == 255:  # white/background pixel, skip
                 x += 1
                 continue
             x_start = x
-            while x < width and row[x] == 0:  # black pixel
+            while x < width and row[x] == 0:  # black/content pixel
                 x += 1
             x_end = x - 1
             if x_end - x_start < 0:
