@@ -345,6 +345,8 @@ def _build_stroke(
     screen_w: int,
     screen_h: int,
     sticker_width: int = 180,
+    _x_offset: float = 0.0,
+    _y_offset: float = 0.0,
 ) -> bytes:
     """Build a single stroke record from contour points.
 
@@ -441,9 +443,9 @@ def _build_stroke(
     # matches the un-mirrored bitmap layer.
     buf += _p(n_vec)
     for x, y in vector_pts:
-        mirrored_x = (sticker_width - 1) - x - (sticker_width / 4)
+        mirrored_x = (sticker_width - 1) - x - _x_offset
         digi_x = int(mirrored_x * _VEC_SCALE + _VEC_OFFSET_X)
-        digi_y = int(y * _VEC_SCALE + _VEC_OFFSET_Y)
+        digi_y = int((y - _y_offset) * _VEC_SCALE + _VEC_OFFSET_Y)
         buf += _ps(digi_y)   # y stored first
         buf += _ps(digi_x)   # x stored second
 
@@ -598,6 +600,8 @@ def build_trails(
     height: int,
     device: str = "N5",
     pil_image: Image.Image | None = None,
+    x_offset: float | None = None,
+    y_offset: float = 0.0,
 ) -> bytes:
     """Build the trails section using scanline fills on dithered bitmap.
 
@@ -635,6 +639,16 @@ def build_trails(
     # dithered is uint8 with standard grayscale convention:
     #   0   = black (content)  → generate strokes
     #   255 = white (background) → skip
+
+    # Centering offsets for vector mirroring.
+    # The firmware's trail renderer introduces a positional shift;
+    # these empirically-determined offsets compensate so the rendered
+    # strokes align with the bitmap layer.
+    if x_offset is None:
+        x_offset = width / 4   # ≈ 45 px for 180-wide stickers
+    if y_offset == 0.0:
+        y_offset = 10.0
+
     all_strokes = bytearray()
     stroke_nb = 1004
 
@@ -664,7 +678,7 @@ def build_trails(
                 (float(x_start), float(y + 1)),
             ]
 
-            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h, sticker_width=width)
+            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h, sticker_width=width, _x_offset=x_offset, _y_offset=y_offset)
             all_strokes += _pack_u32(len(stroke_data))
             all_strokes += stroke_data
             stroke_nb += 1
@@ -677,7 +691,7 @@ def build_trails(
             (float(width - 1), float(height - 1)), (0.0, float(height - 1)),
         ]
         stroke_data = _build_stroke(
-            fallback_pts, 1004, device, screen_w, screen_h, sticker_width=width,
+            fallback_pts, 1004, device, screen_w, screen_h, sticker_width=width, _x_offset=x_offset, _y_offset=y_offset,
         )
         all_strokes = bytearray(_pack_u32(len(stroke_data))) + bytearray(stroke_data)
         num_strokes = 1
@@ -714,6 +728,8 @@ def build_sticker(
     height: int,
     device: str = "N5",
     pil_image: Image.Image | None = None,
+    x_offset: float | None = None,
+    y_offset: float = 0.0,
 ) -> bytes:
     """Assemble a complete ``.sticker`` binary from pixel data.
 
@@ -749,7 +765,7 @@ def build_sticker(
 
     # Section 3 – trails (required for sticker insertion)
     trails_offset = bitmap_offset + len(bitmap_block)
-    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image)
+    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image, x_offset=x_offset, y_offset=y_offset)
     trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # Section 4 – sticker rect
@@ -851,6 +867,8 @@ def build_snstk(
     size: int = DEFAULT_STICKER_SIZE,
     device: str = "N5",
     trim: bool = True,
+    x_offset: float | None = None,
+    y_offset: float = 0.0,
 ) -> bytes:
     """Build an SNSTK sticker pack and return its raw bytes.
 
@@ -876,7 +894,7 @@ def build_snstk(
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, source in images:
             pixels, w, h, pil_img = image_to_pixels(source, size, trim=trim)
-            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img)
+            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img, x_offset=x_offset, y_offset=y_offset)
             entry_name = f"{name}.sticker"
 
             info = zipfile.ZipInfo(entry_name)

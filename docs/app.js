@@ -461,7 +461,7 @@ const TrailsBuilder = {
    * @param {number} screenH   Screen height
    * @returns {Uint8Array}  Stroke data bytes
    */
-  _buildStroke(contourPts, strokeNb, device, screenW, screenH, stickerWidth = 180) {
+  _buildStroke(contourPts, strokeNb, device, screenW, screenH, stickerWidth = 180, xOffset = null, yOffset = 10) {
     // Dense vector points for pen trajectory (firmware needs many points)
     const vectorPts = this._interpolateContour(contourPts, 2.0);
     const nVec = vectorPts.length;
@@ -520,13 +520,15 @@ const TrailsBuilder = {
     buf.push(..._FLAGS);
 
     // ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
-    // X-mirroring applied here only (not in contour/bbox) because the
-    // firmware horizontally flips rendered vector strokes.
+    // X-mirroring + centering offsets applied here only (not in contour/bbox)
+    // because the firmware horizontally flips rendered vector strokes.
+    // Empirically-determined offsets align the rendered strokes with the bitmap.
+    const _xOff = xOffset !== null ? xOffset : stickerWidth / 4;
     packU32LE(buf, nVec);
     for (const [x, y] of vectorPts) {
-      const mirroredX = (stickerWidth - 1) - x - (stickerWidth / 4);
+      const mirroredX = (stickerWidth - 1) - x - _xOff;
       const digiX = Math.round(mirroredX * VEC_SCALE + VEC_OFFSET_X);
-      const digiY = Math.round(y * VEC_SCALE + VEC_OFFSET_Y);
+      const digiY = Math.round((y - yOffset) * VEC_SCALE + VEC_OFFSET_Y);
       packI32LE(buf, digiY);   // y stored first
       packI32LE(buf, digiX);   // x stored second
     }
