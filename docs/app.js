@@ -461,19 +461,22 @@ const TrailsBuilder = {
    * @param {number} screenH   Screen height
    * @returns {Uint8Array}  Stroke data bytes
    */
-  _buildStroke(contourPts, strokeNb, device, screenW, screenH) {
+  _buildStroke(contourPts, strokeNb, device, screenW, screenH, stickerWidth = 180) {
     // Dense vector points for pen trajectory (firmware needs many points)
     const vectorPts = this._interpolateContour(contourPts, 2.0);
     const nVec = vectorPts.length;
     // Simplified contour points for shape outline
     const nContour = contourPts.length;
 
-    // Coordinate scaling: bbox in sticker pixel space, vector in digitizer space
+    // Two coordinate spaces (verified against official christmas2025.snstk):
+    //   bbox / contour  → sticker pixel coordinates (0..width/height)
+    //   vector points   → pen digitizer coordinates (scaled + offset)
     const VEC_SCALE = 8.0;
     const VEC_OFFSET_X = 15200;
     const VEC_OFFSET_Y = 200;
 
-    // Bounding box in the SAME digitizer coordinate space as vectors
+    // Bounding box in PIXEL space (NOT digitizer space).
+    // The firmware uses these values for sticker placement/hit-testing.
     let minPxX = Infinity, minPxY = Infinity, maxPxX = -Infinity, maxPxY = -Infinity;
     for (const [x, y] of contourPts) {
       if (x < minPxX) minPxX = x;
@@ -481,10 +484,10 @@ const TrailsBuilder = {
       if (x > maxPxX) maxPxX = x;
       if (y > maxPxY) maxPxY = y;
     }
-    const minX = Math.floor(minPxX * VEC_SCALE + VEC_OFFSET_X);
-    const minY = Math.floor(minPxY * VEC_SCALE + VEC_OFFSET_Y);
-    const maxX = Math.floor(maxPxX * VEC_SCALE + VEC_OFFSET_X);
-    const maxY = Math.floor(maxPxY * VEC_SCALE + VEC_OFFSET_Y);
+    const minX = Math.floor(minPxX);
+    const minY = Math.floor(minPxY);
+    const maxX = Math.floor(maxPxX);
+    const maxY = Math.floor(maxPxY);
     const avgX = (minX + maxX) >> 1;
     const avgY = (minY + maxY) >> 1;
 
@@ -517,9 +520,12 @@ const TrailsBuilder = {
     buf.push(..._FLAGS);
 
     // ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
+    // X-mirroring applied here only (not in contour/bbox) because the
+    // firmware horizontally flips rendered vector strokes.
     packU32LE(buf, nVec);
     for (const [x, y] of vectorPts) {
-      const digiX = Math.round(x * VEC_SCALE + VEC_OFFSET_X);
+      const mirroredX = (stickerWidth - 1) - x - (stickerWidth / 4);
+      const digiX = Math.round(mirroredX * VEC_SCALE + VEC_OFFSET_X);
       const digiY = Math.round(y * VEC_SCALE + VEC_OFFSET_Y);
       packI32LE(buf, digiY);   // y stored first
       packI32LE(buf, digiX);   // x stored second
@@ -613,22 +619,22 @@ const TrailsBuilder = {
         while (x < width && ditheredMask[y * width + x] !== 0) x++;  // black run
         const xEnd = x - 1;
         if (xEnd < xStart) continue;
-        // Proper rectangle with 1-pixel height (non-degenerate polygon)
-        // Mirror X axis — the firmware renders trails with X inverted
+        // Rectangle in ORIGINAL pixel space (matching the bitmap).
+        // X-mirroring is applied in _buildStroke's vector encoding only.
         const runPts = [
-          [width - 1 - xStart, y],
-          [width - 1 - xEnd,   y],
-          [width - 1 - xEnd,   y + 1],
-          [width - 1 - xStart, y + 1],
+          [xStart, y],
+          [xEnd,   y],
+          [xEnd,   y + 1],
+          [xStart, y + 1],
         ];
-        wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH));
+        wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH, width));
       }
     }
 
     // Fallback if no strokes at all
     if (numStrokes === 0) {
       const fallbackPts = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]];
-      wrapStroke(this._buildStroke(fallbackPts, 1004, device, screenW, screenH));
+      wrapStroke(this._buildStroke(fallbackPts, 1004, device, screenW, screenH, width));
     }
 
     // TOTALPATH: assemble strokes_count + all stroke chunks

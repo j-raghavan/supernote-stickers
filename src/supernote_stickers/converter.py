@@ -344,6 +344,7 @@ def _build_stroke(
     device: str,
     screen_w: int,
     screen_h: int,
+    sticker_width: int = 180,
 ) -> bytes:
     """Build a single stroke record from contour points.
 
@@ -355,12 +356,17 @@ def _build_stroke(
     samples along the contour (mimicking a real pen trajectory), while the
     **contours** section stores the original simplified polygon vertices.
 
+    Contour/bbox stay in original pixel space (matching the bitmap) while
+    vector points are X-mirrored to counteract the firmware's horizontal
+    flip during trail rendering.
+
     Args:
-        contour_points: List of (x, y) float coordinates from OpenCV.
+        contour_points: List of (x, y) float coordinates in pixel space.
         stroke_nb: Stroke sequence number (1-based).
         device: Device code key from :data:`DEVICES`.
         screen_w: Screen width for the target device.
         screen_h: Screen height for the target device.
+        sticker_width: Sticker width in pixels (for X-mirroring vectors).
 
     Returns:
         Complete stroke_data bytes (stroke header + record body).
@@ -375,24 +381,23 @@ def _build_stroke(
     # Simplified contour points for the contour section
     n_contour = len(contour_points)
 
-    # ---- Coordinate scaling ----
-    # The Supernote firmware expects:
-    #   bbox          → sticker pixel coordinates (0..width/height)
-    #   vector points → pen digitizer coordinates (much larger range)
-    # Working stickers (Christmas Dog) show a ~8x scale between the two.
-    # Device info encodes digitizer dims (21632 × 16224 for N5).
+    # ---- Coordinate spaces ----
+    # The Supernote firmware uses TWO coordinate systems in each stroke:
+    #   bbox / contour  → sticker pixel coordinates (0..width/height)
+    #   vector points   → pen digitizer coordinates (scaled + offset)
+    # Verified against official christmas2025.snstk Christmas Dog sticker.
     _VEC_SCALE = 8.0
     _VEC_OFFSET_X = 15200
     _VEC_OFFSET_Y = 200
 
-    # Compute bounding box in the SAME digitizer coordinate space as vectors
-    # so the firmware sees consistent coordinates for both.
+    # Bounding box in PIXEL space (NOT digitizer space).
+    # The firmware uses these values for sticker placement/hit-testing.
     px_xs = [p[0] for p in contour_points]
     px_ys = [p[1] for p in contour_points]
-    min_x = int(min(px_xs) * _VEC_SCALE + _VEC_OFFSET_X)
-    max_x = int(max(px_xs) * _VEC_SCALE + _VEC_OFFSET_X)
-    min_y = int(min(px_ys) * _VEC_SCALE + _VEC_OFFSET_Y)
-    max_y = int(max(px_ys) * _VEC_SCALE + _VEC_OFFSET_Y)
+    min_x = int(min(px_xs))
+    max_x = int(max(px_xs))
+    min_y = int(min(px_ys))
+    max_y = int(max(px_ys))
     avg_x = (min_x + max_x) // 2
     avg_y = (min_y + max_y) // 2
 
@@ -430,9 +435,14 @@ def _build_stroke(
     buf += _FLAGS
 
     # ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
+    # X-mirroring is applied HERE (not in contour/bbox) because the
+    # firmware horizontally flips rendered vector strokes.  Mirroring
+    # the vector coordinates counteracts this so the visual output
+    # matches the un-mirrored bitmap layer.
     buf += _p(n_vec)
     for x, y in vector_pts:
-        digi_x = int(x * _VEC_SCALE + _VEC_OFFSET_X)
+        mirrored_x = (sticker_width - 1) - x - (sticker_width / 4)
+        digi_x = int(mirrored_x * _VEC_SCALE + _VEC_OFFSET_X)
         digi_y = int(y * _VEC_SCALE + _VEC_OFFSET_Y)
         buf += _ps(digi_y)   # y stored first
         buf += _ps(digi_x)   # x stored second
@@ -642,17 +652,19 @@ def build_trails(
             if x_end - x_start < 0:
                 continue
 
-            # Create rectangle points for this run (pixel space)
-            # Must have non-zero height so firmware renders a filled polygon
-            # Mirror X axis — the firmware renders trails with X inverted
+            # Create rectangle points for this run in ORIGINAL pixel space.
+            # Contour/bbox must match the bitmap positions so the selection
+            # box aligns with the visible content.  X-mirroring (needed
+            # because the firmware flips the rendered vector strokes) is
+            # applied later, in _build_stroke's digitizer transform only.
             run_pts = [
-                (float(width - 1 - x_start), float(y)),
-                (float(width - 1 - x_end), float(y)),
-                (float(width - 1 - x_end), float(y + 1)),
-                (float(width - 1 - x_start), float(y + 1)),
+                (float(x_start), float(y)),
+                (float(x_end), float(y)),
+                (float(x_end), float(y + 1)),
+                (float(x_start), float(y + 1)),
             ]
 
-            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h)
+            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h, sticker_width=width)
             all_strokes += _pack_u32(len(stroke_data))
             all_strokes += stroke_data
             stroke_nb += 1
@@ -665,7 +677,7 @@ def build_trails(
             (float(width - 1), float(height - 1)), (0.0, float(height - 1)),
         ]
         stroke_data = _build_stroke(
-            fallback_pts, 1004, device, screen_w, screen_h,
+            fallback_pts, 1004, device, screen_w, screen_h, sticker_width=width,
         )
         all_strokes = bytearray(_pack_u32(len(stroke_data))) + bytearray(stroke_data)
         num_strokes = 1
