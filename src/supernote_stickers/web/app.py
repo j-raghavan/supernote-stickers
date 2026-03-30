@@ -51,6 +51,7 @@ def convert():
         files[]  – one or more image files
         size     – max sticker dimension (optional, default 180)
         device   – device code (optional, default "N5")
+        trim     – crop transparent borders (optional, default "true")
     """
     uploaded = request.files.getlist("files[]")
     if not uploaded:
@@ -58,6 +59,7 @@ def convert():
 
     size = int(request.form.get("size", DEFAULT_STICKER_SIZE))
     device = request.form.get("device", "N5")
+    trim = request.form.get("trim", "true").lower() not in ("false", "0", "no")
 
     if device not in DEVICES:
         return jsonify({"error": f"Unknown device code: {device!r}"}), 400
@@ -73,7 +75,7 @@ def convert():
         images.append((filename.stem, buf))
 
     try:
-        snstk_bytes = build_snstk(images, size=size, device=device)
+        snstk_bytes = build_snstk(images, size=size, device=device, trim=trim)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
