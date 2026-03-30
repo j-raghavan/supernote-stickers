@@ -4,90 +4,305 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Supernote Sticker Converter</title>
+  <meta name="description"
+        content="Convert PNG, JPG, and other images to Supernote .snstk sticker packs. Upload your images and download a ready-to-use sticker pack." />
+
+  <!-- Google Fonts — clean geometric sans-serif inspired by Supernote's typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
   <style>
     :root {
-      --bg: #1a1a2e;
-      --surface: #16213e;
-      --card: #0f3460;
-      --accent: #e94560;
-      --text: #eaeaea;
-      --muted: #a0aec0;
-      --radius: 12px;
+      --bg:         #fafafa;
+      --surface:    #ffffff;
+      --border:     #e8e8e8;
+      --border-hover: #d0d0d0;
+      --accent:     #c0623a;
+      --accent-hover: #a8522e;
+      --accent-light: #fdf4f0;
+      --text:       #1a1a1a;
+      --text-secondary: #6b6b6b;
+      --text-muted: #999999;
+      --green:      #2d8a4e;
+      --green-bg:   #ecfdf3;
+      --red:        #d93025;
+      --red-bg:     #fef2f2;
+      --radius:     12px;
+      --radius-sm:  8px;
+      --shadow-sm:  0 1px 2px rgba(0,0,0,.05);
+      --shadow-md:  0 4px 16px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.04);
+      --shadow-lg:  0 8px 32px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+      --font-sans:  'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --font-mono:  'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+      --transition: 0.2s cubic-bezier(.4,0,.2,1);
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-family: var(--font-sans);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 2rem 1rem;
+      padding: 0 1rem 4rem;
+      line-height: 1.6;
+      font-size: 15px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
-    header { text-align: center; margin-bottom: 2rem; }
-    header h1 { font-size: 2.2rem; color: var(--accent); letter-spacing: 1px; }
-    header p  { color: var(--muted); margin-top: .4rem; }
 
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--card);
-      border-radius: var(--radius);
-      padding: 2rem;
+    /* ========== Nav ========== */
+    .nav {
       width: 100%;
-      max-width: 600px;
-    }
-
-    label { display: block; margin-bottom: .5rem; font-weight: 600; }
-    .hint { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
-
-    .drop-zone {
-      border: 2px dashed var(--card);
-      border-radius: var(--radius);
-      padding: 2.5rem 1rem;
-      text-align: center;
-      cursor: pointer;
-      transition: border-color .2s;
-      margin-bottom: 1.5rem;
-    }
-    .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); }
-    .drop-zone input[type=file] { display: none; }
-    .drop-zone .icon { font-size: 3rem; }
-    .drop-zone p { margin-top: .6rem; color: var(--muted); }
-
-    .file-list { list-style: none; margin: 0 0 1.5rem; }
-    .file-list li {
-      background: var(--card);
-      border-radius: 8px;
-      padding: .5rem .8rem;
-      margin-bottom: .4rem;
-      font-size: .9rem;
+      max-width: 720px;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding: 1.5rem 0;
+      margin-bottom: 1rem;
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .nav-brand svg { flex-shrink: 0; }
+    .nav-brand span {
+      font-weight: 600;
+      font-size: .95rem;
+      letter-spacing: -.01em;
+    }
+    .nav-link {
+      font-size: .875rem;
+      color: var(--text-secondary);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      transition: color var(--transition);
+    }
+    .nav-link:hover { color: var(--text); }
+    .nav-link svg { width: 16px; height: 16px; }
+
+    /* ========== Hero ========== */
+    .hero {
+      text-align: center;
+      max-width: 540px;
+      margin-bottom: 2.5rem;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      background: var(--accent-light);
+      color: var(--accent);
+      font-size: .8rem;
+      font-weight: 600;
+      padding: .3rem .8rem;
+      border-radius: 999px;
+      margin-bottom: 1.25rem;
+      letter-spacing: .01em;
+    }
+    .hero h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -.025em;
+      line-height: 1.2;
+      color: var(--text);
+      margin-bottom: .75rem;
+    }
+    .hero p {
+      color: var(--text-secondary);
+      font-size: 1.05rem;
+      line-height: 1.5;
+    }
+    .hero code {
+      font-family: var(--font-mono);
+      font-size: .9rem;
+      background: var(--accent-light);
+      color: var(--accent);
+      padding: .15em .4em;
+      border-radius: 4px;
+    }
+
+    /* ========== Card ========== */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 640px;
+      box-shadow: var(--shadow-md);
+    }
+
+    /* ========== Drop zone ========== */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 2.5rem 1.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: all var(--transition);
+      margin-bottom: 1.5rem;
+      background: var(--bg);
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-light);
+    }
+    .drop-zone .icon {
+      width: 48px;
+      height: 48px;
+      margin: 0 auto .75rem;
+      background: var(--accent-light);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .drop-zone .icon svg {
+      width: 24px;
+      height: 24px;
+      color: var(--accent);
+    }
+    .drop-zone p {
+      color: var(--text-secondary);
+      font-size: .95rem;
+    }
+    .drop-zone p strong {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .drop-zone .formats {
+      margin-top: .4rem;
+      font-size: .82rem;
+      color: var(--text-muted);
+      letter-spacing: .02em;
+    }
+    .drop-zone input { display: none; }
+
+    /* ========== File list ========== */
+    .file-list {
+      list-style: none;
+      margin-bottom: 1.5rem;
+    }
+    .file-list:empty { margin-bottom: 0; }
+    .file-list li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: .55rem .85rem;
+      margin-bottom: .35rem;
+      font-size: .875rem;
+      transition: border-color var(--transition);
+    }
+    .file-list li:hover { border-color: var(--border-hover); }
+    .file-list .file-info {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      min-width: 0;
+    }
+    .file-list .file-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--accent-light);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .file-list .file-icon svg {
+      width: 16px;
+      height: 16px;
+      color: var(--accent);
+    }
+    .file-list .file-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-list .file-size {
+      color: var(--text-muted);
+      font-size: .8rem;
+      margin-left: .25rem;
     }
     .file-list .remove {
-      cursor: pointer;
-      color: var(--accent);
-      font-size: 1.1rem;
       background: none;
       border: none;
-      color: var(--accent);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 1rem;
+      padding: .2rem .4rem;
+      border-radius: 4px;
+      transition: all var(--transition);
+      line-height: 1;
+    }
+    .file-list .remove:hover {
+      color: var(--red);
+      background: var(--red-bg);
     }
 
-    .row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-    .field { flex: 1; min-width: 160px; }
+    /* ========== Options ========== */
+    .options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 480px) {
+      .options { grid-template-columns: 1fr; }
+    }
+    .field label {
+      display: block;
+      font-weight: 500;
+      font-size: .875rem;
+      margin-bottom: .35rem;
+      color: var(--text);
+    }
+    .hint {
+      font-size: .78rem;
+      color: var(--text-muted);
+      margin-top: .3rem;
+      line-height: 1.4;
+    }
     input[type=number], select {
       width: 100%;
-      padding: .5rem .8rem;
+      padding: .55rem .75rem;
       background: var(--bg);
-      border: 1px solid var(--card);
-      border-radius: 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
       color: var(--text);
-      font-size: .95rem;
-      margin-top: .3rem;
+      font-family: var(--font-sans);
+      font-size: .9rem;
+      transition: border-color var(--transition), box-shadow var(--transition);
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+    input[type=number]:focus, select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(192, 98, 58, .12);
+    }
+    select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%236b6b6b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right .75rem center;
+      padding-right: 2rem;
     }
 
+    /* ========== Checkbox ========== */
     .checkbox-field {
       display: flex;
       align-items: center;
@@ -99,127 +314,289 @@
       height: 18px;
       accent-color: var(--accent);
       cursor: pointer;
+      flex-shrink: 0;
     }
     .checkbox-field label {
       display: inline;
       margin-bottom: 0;
-      font-weight: 600;
+      font-weight: 500;
+      font-size: .875rem;
       cursor: pointer;
     }
 
+    /* ========== Button ========== */
     .btn {
-      display: block;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
       width: 100%;
-      padding: .85rem;
+      padding: .85rem 1.25rem;
       background: var(--accent);
       color: #fff;
       border: none;
       border-radius: var(--radius);
-      font-size: 1.05rem;
-      font-weight: 700;
+      font-family: var(--font-sans);
+      font-size: .95rem;
+      font-weight: 600;
       cursor: pointer;
-      transition: opacity .2s;
+      transition: all var(--transition);
+      letter-spacing: .01em;
     }
-    .btn:disabled { opacity: .5; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { opacity: .88; }
+    .btn:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+    .btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+      box-shadow: 0 2px 8px rgba(192, 98, 58, .25);
+      transform: translateY(-1px);
+    }
+    .btn:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    .btn svg {
+      width: 18px;
+      height: 18px;
+    }
 
     #status {
-      margin-top: 1rem;
+      margin-top: .75rem;
       text-align: center;
-      font-size: .95rem;
-      min-height: 1.4rem;
+      font-size: .9rem;
+      min-height: 1.3rem;
+      font-weight: 500;
     }
-    .error   { color: #fc8181; }
-    .success { color: #68d391; }
+    .error   { color: var(--red); }
+    .success { color: var(--green); }
 
-    .disclaimer {
+    /* ========== How-to ========== */
+    .howto {
       margin-top: 2rem;
-      background: var(--surface);
-      border-left: 4px solid var(--accent);
-      border-radius: var(--radius);
-      padding: 1.2rem 1.5rem;
-      font-size: .88rem;
-      color: var(--muted);
-      max-width: 600px;
+      max-width: 640px;
       width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.75rem 2rem;
+      box-shadow: var(--shadow-sm);
     }
-    .disclaimer strong { color: var(--text); }
+    .howto h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: .85rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .howto h2 svg {
+      width: 18px;
+      height: 18px;
+      color: var(--accent);
+    }
+    .howto ol {
+      padding-left: 1.2rem;
+      counter-reset: steps;
+      list-style: none;
+    }
+    .howto li {
+      color: var(--text-secondary);
+      margin-bottom: .5rem;
+      font-size: .9rem;
+      position: relative;
+      padding-left: .4rem;
+      counter-increment: steps;
+    }
+    .howto li::before {
+      content: counter(steps);
+      position: absolute;
+      left: -1.4rem;
+      top: .05rem;
+      width: 1.15rem;
+      height: 1.15rem;
+      background: var(--accent-light);
+      color: var(--accent);
+      font-size: .7rem;
+      font-weight: 700;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .howto code {
+      font-family: var(--font-mono);
+      font-size: .82rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: .1em .35em;
+      border-radius: 4px;
+    }
+    .howto strong { color: var(--text); font-weight: 600; }
 
+    /* ========== Disclaimer ========== */
+    .disclaimer {
+      margin-top: 1.25rem;
+      max-width: 640px;
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.15rem 1.5rem;
+      font-size: .82rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    .disclaimer strong {
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    /* ========== Footer ========== */
     footer {
-      margin-top: 2rem;
-      color: var(--muted);
+      margin-top: 2.5rem;
+      color: var(--text-muted);
       font-size: .82rem;
       text-align: center;
     }
-    footer a { color: var(--accent); text-decoration: none; }
+    footer a {
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: color var(--transition);
+    }
+    footer a:hover { color: var(--accent); }
+
+    /* ========== Subtle animation ========== */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .card, .howto, .disclaimer {
+      animation: fadeIn .5s ease forwards;
+    }
+    .howto { animation-delay: .1s; }
+    .disclaimer { animation-delay: .15s; }
   </style>
 </head>
 <body>
 
-<header>
-  <h1>📓 Supernote Sticker Converter</h1>
-  <p>Upload images → get a <code>.snstk</code> sticker pack for your Supernote device</p>
-</header>
+<!-- ===== Nav ===== -->
+<nav class="nav">
+  <a href="#" class="nav-brand">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="28" height="28" rx="7" fill="#c0623a" opacity=".1"/>
+      <path d="M8 9.5h12M8 14h12M8 18.5h8" stroke="#c0623a" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span>Sticker Converter</span>
+  </a>
+  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank" rel="noopener noreferrer" class="nav-link">
+    <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</nav>
 
-<div class="card">
-  <form id="convertForm" enctype="multipart/form-data">
-
-    <div class="drop-zone" id="dropZone">
-      <div class="icon">🖼️</div>
-      <p>Drag &amp; drop images here, or <strong>click to browse</strong></p>
-      <p class="hint">Supported: {{ supported_extensions | join(', ') }}</p>
-      <input type="file" id="fileInput" name="files[]" multiple
-             accept="{{ supported_extensions | join(',') }}" />
-    </div>
-
-    <ul class="file-list" id="fileList"></ul>
-
-    <div class="row">
-      <div class="field">
-        <label for="size">Max dimension (px)</label>
-        <input type="number" id="size" name="size"
-               value="{{ default_size }}" min="32" max="512" step="1" />
-        <p class="hint">Stickers are scaled to fit inside this square.</p>
-      </div>
-      <div class="field">
-        <label for="device">Target device</label>
-        <select id="device" name="device">
-          {% for code, info in devices.items() %}
-          <option value="{{ code }}" {% if code == "N5" %}selected{% endif %}>
-            {{ code }} – {{ info.name }}
-          </option>
-          {% endfor %}
-        </select>
-      </div>
-    </div>
-
-    <div class="checkbox-field">
-      <input type="checkbox" id="trim" checked />
-      <label for="trim">Trim transparent borders</label>
-    </div>
-    <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
-      Removes invisible padding around the image so the sticker content fills the available space.
-    </p>
-
-    <button type="submit" class="btn" id="convertBtn" disabled>
-      ⬇️ Convert &amp; Download
-    </button>
-    <p id="status"></p>
-  </form>
+<!-- ===== Hero ===== -->
+<div class="hero">
+  <div class="hero-badge">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+    Server-based
+  </div>
+  <h1>Convert images to Supernote stickers</h1>
+  <p>Upload your images and download a ready-to-use <code>.snstk</code> sticker pack.</p>
 </div>
 
+<!-- ===== Main card ===== -->
+
+<div class="card">
+
+  <!-- Drop zone -->
+  <div class="drop-zone" id="dropZone" role="button" aria-label="Upload images">
+    <div class="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+    </div>
+    <p>Drag & drop images here, or <strong>click to browse</strong></p>
+    <p class="formats">PNG · JPG · WebP · BMP · GIF · TIFF</p>
+    <input type="file" id="fileInput" name="files[]" multiple
+           accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.tif" />
+  </div>
+
+  <!-- Selected file list -->
+  <ul class="file-list" id="fileList" aria-live="polite"></ul>
+
+  <!-- Options -->
+  <div class="options">
+    <div class="field">
+      <label for="size">Max dimension (px)</label>
+      <input type="number" id="size" value="{{ default_size }}" min="32" max="512" step="1" />
+      <p class="hint">Stickers are scaled to fit this square.</p>
+    </div>
+    <div class="field">
+      <label for="device">Target device</label>
+      <select id="device">
+        {% for code, info in devices.items() %}
+        <option value="{{ code }}" {% if code == "N5" %}selected{% endif %}>
+          {{ code }} – {{ info.name }}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <!-- Trim option -->
+  <div class="checkbox-field">
+    <input type="checkbox" id="trim" checked />
+    <label for="trim">Trim transparent borders</label>
+  </div>
+  <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
+    Removes invisible padding around the image so the sticker content fills the available space.
+  </p>
+
+  <!-- Convert button -->
+  <button class="btn" id="convertBtn" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+    Convert &amp; Download
+  </button>
+
+  <p id="status" aria-live="polite"></p>
+</div>
+
+<!-- ===== How-to ===== -->
+<div class="howto">
+  <h2>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    How to use your sticker pack
+  </h2>
+  <ol>
+    <li>Download the <code>.snstk</code> file above.</li>
+    <li>Connect your Supernote to your computer via USB or Supernote Cloud.</li>
+    <li>Copy the file to your Supernote's <strong>EXPORT</strong> folder.</li>
+    <li>On your Supernote, open a Note, tap the <strong>Stickers</strong> button in the toolbar, and import.</li>
+  </ol>
+</div>
+
+<!-- ===== Disclaimer ===== -->
 <div class="disclaimer">
-  <strong>⚠️ Disclaimer</strong><br />
-  This tool is an <em>independent fan project</em> created by a Supernote
-  enthusiast who wants to give back to the community. It is <strong>not
-  affiliated with, endorsed by, or officially supported by Ratta Supernote</strong>.
-  Use at your own risk. All product names and trademarks are the property of
-  their respective owners.
+  <strong>Disclaimer</strong> &mdash;
+  This tool is an independent fan project and is <strong>not affiliated with, endorsed by, or officially supported by Ratta Supernote</strong>.
+  Your images are processed on the server &mdash; please review the source code if you have privacy concerns.
+  All product names and trademarks are the property of their respective owners.
 </div>
 
 <footer>
-  Made with ❤️ for the Supernote community ·
-  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank">GitHub</a>
+  Made with care for the Supernote community ·
+  <a href="https://github.com/j-raghavan/supernote-stickers" target="_blank" rel="noopener noreferrer">GitHub</a>
 </footer>
 
 <script>
@@ -255,12 +632,26 @@
     fileList.innerHTML = '';
     selectedFiles.forEach((f, i) => {
       const li = document.createElement('li');
-      li.innerHTML = `<span>📄 ${f.name} <em style="color:var(--muted)">(${(f.size/1024).toFixed(1)} KB)</em></span>
-                      <button class="remove" data-i="${i}" title="Remove">✕</button>`;
+      const sizeKB = (f.size / 1024).toFixed(1);
+      li.innerHTML = `
+        <div class="file-info">
+          <div class="file-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+              <polyline points="13 2 13 9 20 9"/>
+            </svg>
+          </div>
+          <div>
+            <div class="file-name">${f.name}</div>
+            <div class="file-size">${sizeKB} KB</div>
+          </div>
+        </div>
+        <button type="button" class="remove" data-i="${i}" title="Remove">×</button>
+      `;
       fileList.appendChild(li);
     });
     fileList.querySelectorAll('.remove').forEach(btn =>
-      btn.addEventListener('click', () => { selectedFiles.splice(+btn.dataset.i, 1); renderList(); })
+      btn.addEventListener('click', (e) => { e.preventDefault(); selectedFiles.splice(+btn.dataset.i, 1); renderList(); })
     );
     convertBtn.disabled = selectedFiles.length === 0;
     statusEl.textContent = '';
@@ -268,7 +659,7 @@
   }
 
   // ---- Submit ----
-  document.getElementById('convertForm').addEventListener('submit', async e => {
+  convertBtn.addEventListener('click', async e => {
     e.preventDefault();
     if (!selectedFiles.length) return;
 
@@ -290,9 +681,9 @@
       }
       const blob = await res.blob();
       const url  = URL.createObjectURL(blob);
-      const a    = Object.assign(document.createElement('a'), {
-        href: url, download: 'stickers.snstk'
-      });
+      const a    = document.createElement('a');
+      a.href = url;
+      a.download = 'stickers.snstk';
       document.body.appendChild(a);
       a.click();
       a.remove();

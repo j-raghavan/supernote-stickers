@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -92,8 +93,17 @@ def convert():
 
 def run() -> None:
     """Start the development server (``snstk-web`` command)."""
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Flask always listens on 5000 internally for reliability
+    internal_port = 5000
+    
+    # Get external port for logging purposes (if different from internal)
+    external_port = os.environ.get("PORT", internal_port)
+    if int(external_port) != internal_port:
+        print(f"\n⚠️  WARNING: This is a development server. Do not use it in production deployment.\n"
+              f"   Container listening on: {internal_port}\n"
+              f"   Access from host on: {external_port}\n", file=sys.stderr)
+    
+    app.run(host="0.0.0.0", port=internal_port, debug=False)
 
 
 if __name__ == "__main__":
