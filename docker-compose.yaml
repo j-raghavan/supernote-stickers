@@ -5,17 +5,19 @@ services:
     # Simple port configuration:
     # - Container always listens on 5000 internally
     # - Port mapping controls external access
-    # 
+    #
     # Examples:
     #   Default:  ports: ["5000:5000"]    -> access via localhost:5000
     #   Custom:   ports: ["30314:5000"]   -> access via localhost:30314
     #   Set PORT env var to show in logs which external port to use
     # Use hosted image (no local build needed)
-    image: ghcr.io/mavproductions/supernote-stickers:latest
+    image: ${DOCKER_REPO:-ghcr.io/mavproductions}/supernote-stickers:${IMAGE_TAG:-latest}
+
     # Uncomment below to build locally instead:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
+
     container_name: supernote-stickers
     restart: unless-stopped
     ports:
