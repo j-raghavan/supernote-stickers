@@ -101,7 +101,7 @@ class TestEncodeRle:
 class TestImageToPixels:
     def test_opaque_black_image(self):
         buf = _make_rgba_image(10, 10, (0, 0, 0, 255))
-        pixels, w, h, _img = image_to_pixels(buf, size=10)
+        pixels, w, h, _img, _bw = image_to_pixels(buf, size=10)
         assert w == 10
         assert h == 10
         assert len(pixels) == 100
@@ -110,19 +110,19 @@ class TestImageToPixels:
 
     def test_transparent_image(self):
         buf = _make_rgba_image(5, 5, (0, 0, 0, 0))
-        pixels, w, h, _img = image_to_pixels(buf, size=10)
+        pixels, w, h, _img, _bw = image_to_pixels(buf, size=10)
         assert all(p == COLORCODE_BACKGROUND for p in pixels)
 
     def test_resize_respects_max_dimension(self):
         buf = _make_rgba_image(200, 100, (0, 0, 0, 255))
-        pixels, w, h, _img = image_to_pixels(buf, size=50)
+        pixels, w, h, _img, _bw = image_to_pixels(buf, size=50)
         assert max(w, h) <= 50
 
     def test_accepts_file_path(self, tmp_path: Path):
         img = Image.new("RGBA", (20, 20), (0, 0, 0, 255))
         p = tmp_path / "test.png"
         img.save(p)
-        pixels, w, h, _img = image_to_pixels(p)
+        pixels, w, h, _img, _bw = image_to_pixels(p)
         assert len(pixels) == w * h
 
     def test_accepts_jpeg(self):
@@ -130,7 +130,7 @@ class TestImageToPixels:
         buf = BytesIO()
         img.save(buf, format="JPEG")
         buf.seek(0)
-        pixels, w, h, _img = image_to_pixels(buf)
+        pixels, w, h, _img, _bw = image_to_pixels(buf)
         assert len(pixels) == w * h
 
 
@@ -212,7 +212,49 @@ class TestBuildSnstk:
             info = zf.getinfo("ascii_name.sticker")
         assert info.flag_bits == 0x800
         assert info.create_version == 51
+        # Host byte of version_made_by MUST be Unix (3): external_attr below
+        # holds Unix mode bits, and the firmware only recognises the sticker
+        # when the host declares Unix.  A FAT host (0) makes every sticker
+        # show blank in the picker.
+        assert info.create_system == 3
         assert info.external_attr == 0x81800000
+
+    def test_zip_raw_headers_declare_unix_host_and_deflate_version(self):
+        """The firmware reads the raw ZIP headers, not zipfile's parsed view.
+
+        Regression guard: version_made_by must be 0x0333 (Unix host 0x03 +
+        version 51) and version_needed must be 20 (DEFLATE) in *every*
+        central-directory and local-file header.
+        """
+        import struct
+
+        buf = _make_rgba_image(20, 20, (0, 0, 0, 255))
+        data = build_snstk([("a", buf), ("b", buf)])
+
+        eocd = data.rfind(b"PK\x05\x06")
+        cd_off = struct.unpack_from("<II", data, eocd + 12)[1]
+
+        # Central-directory headers
+        cur = cd_off
+        n = 0
+        while cur < len(data) and struct.unpack_from("<I", data, cur)[0] == 0x02014B50:
+            version_made_by, version_needed = struct.unpack_from("<HH", data, cur + 4)
+            assert version_made_by == 0x0333, hex(version_made_by)
+            assert version_needed == 20
+            fnl, efl, cml = struct.unpack_from("<HHH", data, cur + 28)
+            cur += 46 + fnl + efl + cml
+            n += 1
+        assert n == 2
+
+        # Local-file headers
+        i = 0
+        locals_seen = 0
+        while (i := data.find(b"PK\x03\x04", i)) >= 0:
+            version_needed = struct.unpack_from("<H", data, i + 4)[0]
+            assert version_needed == 20
+            locals_seen += 1
+            i += 4
+        assert locals_seen == 2
 
 
 # ---------------------------------------------------------------------------

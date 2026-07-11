@@ -54,6 +54,47 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
 # Colour helpers
 # ---------------------------------------------------------------------------
 
+def _is_bw_opaque_image(img: Image.Image, bw_threshold: float = 0.90) -> bool:
+    """Detect an opaque high-contrast B&W image with embedded white details.
+
+    Returns ``True`` when **both** conditions are met:
+
+    1. The image is high-contrast black-and-white — at least
+       *bw_threshold* (default 90 %) of non-transparent pixels are
+       near-black (luminance < 30) or near-white (luminance > 225).
+    2. The image is predominantly opaque — fewer than 5 % of pixels
+       are transparent.
+
+    Condition 2 ensures we only change the pipeline for images that
+    have **opaque white areas** surrounded by black (like a JPG or
+    full-background PNG).  Images with transparent backgrounds (like
+    an icon on a clear canvas) already render correctly with the
+    standard dithering + scanline-fill pipeline and are left
+    untouched to avoid unnecessary output changes.
+    """
+    arr = np.array(img.convert("RGBA"))
+    alpha = arr[:, :, 3]
+    total_pixels = alpha.size
+
+    # Condition 2 — mostly opaque (< 5 % transparent)
+    transparent_fraction = float(np.sum(alpha < 10)) / total_pixels
+    if transparent_fraction > 0.05:
+        return False
+
+    # Condition 1 — high-contrast B&W
+    opaque_mask = alpha > 0
+    if not opaque_mask.any():
+        return False
+    lum = (
+        0.299 * arr[:, :, 0].astype(np.float64)
+        + 0.587 * arr[:, :, 1].astype(np.float64)
+        + 0.114 * arr[:, :, 2].astype(np.float64)
+    )
+    opaque_lum = lum[opaque_mask]
+    bw_count = np.sum((opaque_lum < 30) | (opaque_lum > 225))
+    return float(bw_count) / len(opaque_lum) >= bw_threshold
+
+
 def alpha_to_colorcode(alpha: int) -> int:
     """Convert an alpha value (0=transparent, 255=opaque) to a Supernote colour code."""
     if alpha < 9:
@@ -72,13 +113,14 @@ def image_to_pixels(
     source: str | Path | BinaryIO,
     size: int = DEFAULT_STICKER_SIZE,
     trim: bool = True,
-) -> tuple[list[int], int, int, Image.Image]:
-    """Load an image and return ``(pixels, width, height, pil_image)``.
+) -> tuple[list[int], int, int, Image.Image, bool]:
+    """Load an image and return ``(pixels, width, height, pil_image, is_bw)``.
 
     *source* may be a file path or any file-like object (e.g. a
     ``BytesIO`` from a web upload).  All Pillow-supported formats are
     accepted.  The returned *pil_image* is the resized RGBA image used
-    for high-quality trail dithering.
+    for high-quality trail dithering.  *is_bw* indicates whether the
+    source was detected as a high-contrast black-and-white image.
 
     When *trim* is ``True`` (the default), transparent borders are
     cropped away before resizing so the visible content fills as much
@@ -86,6 +128,12 @@ def image_to_pixels(
     """
     img = Image.open(source).convert("RGBA")
     orig_max_dim = max(img.size)
+
+    # Detect opaque B&W images early (before resizing) for pipeline
+    # optimisation.  Only images without transparency need the special
+    # handling — transparent-background images render fine with the
+    # standard pipeline.
+    is_bw = _is_bw_opaque_image(img)
 
     if trim:
         bbox = img.getbbox()  # bounding box of non-transparent pixels
@@ -106,7 +154,13 @@ def image_to_pixels(
     scale = min(target / trimmed_w, target / trimmed_h)
     new_w = max(1, round(trimmed_w * scale))
     new_h = max(1, round(trimmed_h * scale))
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # B&W images: use NEAREST resampling to preserve crisp edges.
+    # LANCZOS creates anti-aliased gray pixels at black/white boundaries
+    # which, combined with trail stroke bleeding on the e-ink display,
+    # causes fine white detail lines to be swallowed by surrounding black.
+    resample = Image.NEAREST if is_bw else Image.LANCZOS
+    img = img.resize((new_w, new_h), resample)
 
     # Centre on a size×size canvas so the bitmap and trail layers are
     # consistently positioned, matching the reference coordinate system
@@ -131,7 +185,7 @@ def image_to_pixels(
                 ink_alpha = int((255 - gray) * (a / 255))
                 pixels.append(alpha_to_colorcode(ink_alpha))
 
-    return pixels, w, h, img
+    return pixels, w, h, img, is_bw
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +656,7 @@ def build_trails(
     pil_image: Image.Image | None = None,
     x_offset: float | None = None,
     y_offset: float = 0.0,
+    is_bw: bool = False,
 ) -> bytes:
     """Build the trails section using scanline fills on dithered bitmap.
 
@@ -614,12 +669,19 @@ def build_trails(
     When *pil_image* is provided, dithering works directly from the full
     256-level RGBA data instead of the lossy 17-level colour codes.
 
+    When *is_bw* is ``True``, the image is treated as high-contrast
+    black-and-white line art.  Dithering is replaced by a simple
+    luminance threshold, and only every 3rd row is scanned for strokes.
+    This prevents the trail layer's pen strokes from bleeding into and
+    covering fine white detail areas on the e-ink display.
+
     Args:
         pixels: Supernote colour codes (row-major, length = *width* × *height*).
         width:  Sticker width in pixels.
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
         pil_image: Optional PIL RGBA image for high-quality dithering.
+        is_bw: Whether the source image is high-contrast B&W line art.
 
     Returns:
         Raw bytes for the trails block (**excluding** the leading uint32
@@ -628,12 +690,24 @@ def build_trails(
     _pack_u32 = struct.Struct("<I").pack
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
-    # Dither from full RGBA data when available (much higher quality)
-    if pil_image is not None:
-        gray = _rgba_image_to_grayscale(pil_image)
+    if is_bw:
+        # B&W line art: use a simple luminance threshold instead of
+        # dithering.  Dithering adds noise dots at edges that, combined
+        # with pen stroke thickness on the e-ink display, cause fine
+        # white details to be swallowed by surrounding black.
+        if pil_image is not None:
+            gray = _rgba_image_to_grayscale(pil_image)
+        else:
+            gray = _pixels_to_grayscale(pixels, width, height)
+        # Simple threshold: < 128 → black (0), >= 128 → white (255)
+        dithered = np.where(gray < 128, 0, 255).astype(np.uint8)
     else:
-        gray = _pixels_to_grayscale(pixels, width, height)
-    dithered = _floyd_steinberg_dither(gray)
+        # Dither from full RGBA data when available (much higher quality)
+        if pil_image is not None:
+            gray = _rgba_image_to_grayscale(pil_image)
+        else:
+            gray = _pixels_to_grayscale(pixels, width, height)
+        dithered = _floyd_steinberg_dither(gray)
 
     # Generate scanline fill strokes from dithered mask.
     # dithered is uint8 with standard grayscale convention:
@@ -651,6 +725,27 @@ def build_trails(
 
     all_strokes = bytearray()
     stroke_nb = 1004
+
+    if is_bw:
+        # B&W line art: erode the black mask before generating scanline
+        # fills.  The SuperNote renders trails as the primary visual
+        # layer, and each pen stroke bleeds on the e-ink display.
+        # Erosion shrinks the black regions inward, creating a buffer
+        # zone around white detail areas.  When the pen bleeds outward
+        # during rendering, the strokes expand back toward the original
+        # boundary without overflowing into the white details.
+        #
+        # A cross-shaped 3×3 kernel (1 px erosion in cardinal directions)
+        # is the lightest erosion that provides meaningful protection
+        # without fragmenting thin features at 180×180 sticker scale.
+        import cv2
+        # dithered: 0=black(content), 255=white(bg)
+        # cv2.erode treats white(255) as foreground by default, so we
+        # invert: 255=content, 0=bg → erode content → invert back.
+        content_mask = (255 - dithered)
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        eroded = cv2.erode(content_mask, kernel, iterations=1)
+        dithered = 255 - eroded
 
     for y in range(height):
         row = dithered[y]
@@ -730,6 +825,7 @@ def build_sticker(
     pil_image: Image.Image | None = None,
     x_offset: float | None = None,
     y_offset: float = 0.0,
+    is_bw: bool = False,
 ) -> bytes:
     """Assemble a complete ``.sticker`` binary from pixel data.
 
@@ -739,6 +835,7 @@ def build_sticker(
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
         pil_image: Optional PIL RGBA image for high-quality trail dithering.
+        is_bw: Whether the source image is high-contrast B&W line art.
 
     Returns:
         Raw bytes suitable for inclusion in an SNSTK ZIP archive.
@@ -765,7 +862,7 @@ def build_sticker(
 
     # Section 3 – trails (required for sticker insertion)
     trails_offset = bitmap_offset + len(bitmap_block)
-    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image, x_offset=x_offset, y_offset=y_offset)
+    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image, x_offset=x_offset, y_offset=y_offset, is_bw=is_bw)
     trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # Section 4 – sticker rect
@@ -797,11 +894,24 @@ def build_sticker(
 # ---------------------------------------------------------------------------
 # The Supernote firmware's sticker-pack importer is strict about ZIP entry
 # metadata.  Working packs (e.g. christmas2025.snstk) require:
-#   flag_bits      = 0x800  (UTF-8 filename flag)
-#   create_version = 51
-#   external_attr  = 0x81800000
+#   flag_bits        = 0x800       (UTF-8 filename flag)
+#   version_made_by  = 0x0333      (Unix host 0x03 + zip version 51)
+#   version_needed   = 20          (2.0 — required for DEFLATE)
+#   external_attr    = 0x81800000  (Unix mode S_IFREG | 0600)
+# The Unix host byte (high byte of version_made_by) is critical: the
+# external_attr above holds Unix file-mode bits, and the firmware only
+# interprets them — and thus recognises the entry as a sticker — when the
+# host byte declares Unix.  Writing version_made_by=51 (host byte 0x00 =
+# FAT/DOS) leaves the mode bits uninterpretable, and the importer silently
+# rejects every entry, so all stickers show blank in the picker.
+#
 # Python's zipfile module forcibly resets flag_bits=0 in writestr(), so we
 # patch the real ZIP headers after generation.
+
+# version_made_by: Unix host (0x03) in the high byte, ZIP spec version 51
+# in the low byte → 0x0333.  Matches official Supernote packs exactly.
+_ZIP_VERSION_MADE_BY = (0x03 << 8) | 51
+_ZIP_VERSION_NEEDED = 20  # 2.0 — minimum for DEFLATE-compressed entries
 
 _ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034B50
 _ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014B50
@@ -835,7 +945,10 @@ def _patch_zip_flags(data: bytes) -> bytes:
         if signature != _ZIP_CENTRAL_DIRECTORY_SIGNATURE:
             raise ValueError(f"Invalid central directory signature at offset {cursor}")
 
-        struct.pack_into("<H", buf, cursor + 4, 51)  # create_version
+        # version_made_by (host byte + version) — MUST keep the Unix host
+        # byte or the firmware rejects the entry (see module note above).
+        struct.pack_into("<H", buf, cursor + 4, _ZIP_VERSION_MADE_BY)
+        struct.pack_into("<H", buf, cursor + 6, _ZIP_VERSION_NEEDED)  # version_needed
         flags = struct.unpack_from("<H", buf, cursor + 8)[0]
         struct.pack_into("<H", buf, cursor + 8, flags | 0x800)
         struct.pack_into("<I", buf, cursor + 38, 0x81800000)
@@ -848,6 +961,7 @@ def _patch_zip_flags(data: bytes) -> bytes:
             raise ValueError(
                 f"Invalid local file header signature at offset {local_header_offset}"
             )
+        struct.pack_into("<H", buf, local_header_offset + 4, _ZIP_VERSION_NEEDED)
         flags = struct.unpack_from("<H", buf, local_header_offset + 6)[0]
         struct.pack_into("<H", buf, local_header_offset + 6, flags | 0x800)
 
@@ -893,12 +1007,17 @@ def build_snstk(
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, source in images:
-            pixels, w, h, pil_img = image_to_pixels(source, size, trim=trim)
-            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img, x_offset=x_offset, y_offset=y_offset)
+            pixels, w, h, pil_img, is_bw = image_to_pixels(source, size, trim=trim)
+            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img, x_offset=x_offset, y_offset=y_offset, is_bw=is_bw)
             entry_name = f"{name}.sticker"
 
             info = zipfile.ZipInfo(entry_name)
             info.compress_type = zipfile.ZIP_DEFLATED
+            # Declare Unix host + version 51 so external_attr's Unix mode
+            # bits are valid.  create_system defaults to FAT (0) on Windows,
+            # which would zero the host byte — set it explicitly.  (The
+            # _patch_zip_flags pass re-asserts this too, defensively.)
+            info.create_system = 3  # Unix
             info.create_version = 51
             info.external_attr = 0x81800000
             zf.writestr(info, sticker_data)

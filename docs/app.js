@@ -756,6 +756,16 @@ const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 
+// version_made_by MUST declare the Unix host (high byte 0x03) alongside zip
+// version 51 → 0x0333.  The external_attr set below (0x81800000) holds Unix
+// file-mode bits (S_IFREG | 0600); the Supernote firmware only interprets
+// them — and thus recognises the entry as a sticker — when the host byte is
+// Unix.  Writing 51 (host byte 0x00 = FAT/DOS) makes the mode bits invalid
+// and the importer silently rejects every sticker, so the whole pack shows
+// blank in the on-device picker.  Matches official Supernote packs exactly.
+const ZIP_VERSION_MADE_BY = (0x03 << 8) | 51; // 0x0333
+const ZIP_VERSION_NEEDED = 20;                // 2.0 — required for DEFLATE
+
 function findEocdOffset(dv) {
   const minEocdSize = 22;
   const maxCommentLength = 0xffff;
@@ -786,7 +796,10 @@ function patchZipMetadata(buffer) {
       throw new Error(`Invalid central directory signature at offset ${cursor}`);
     }
 
-    dv.setUint16(cursor + 4, 51, true);             // create_version
+    // Keep the Unix host byte in version_made_by (see note above) — a bare
+    // 51 here zeroes it and the firmware rejects the entry → blank picker.
+    dv.setUint16(cursor + 4, ZIP_VERSION_MADE_BY, true);  // version_made_by
+    dv.setUint16(cursor + 6, ZIP_VERSION_NEEDED, true);   // version_needed
     const centralFlags = dv.getUint16(cursor + 8, true);
     dv.setUint16(cursor + 8, centralFlags | 0x800, true);
     dv.setUint32(cursor + 38, 0x81800000, true);    // external_attr
@@ -800,6 +813,7 @@ function patchZipMetadata(buffer) {
       throw new Error(`Invalid local file header signature at offset ${localHeaderOffset}`);
     }
 
+    dv.setUint16(localHeaderOffset + 4, ZIP_VERSION_NEEDED, true); // version_needed
     const localFlags = dv.getUint16(localHeaderOffset + 6, true);
     dv.setUint16(localHeaderOffset + 6, localFlags | 0x800, true);
 
