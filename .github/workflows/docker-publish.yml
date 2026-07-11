@@ -34,7 +34,10 @@ jobs:
         with:
           registry: ${{ env.REGISTRY_GHCR }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          # Built-in token scoped by the job's `packages: write` permission —
+          # no repo secret to configure. (The old GHCR_TOKEN secret was never
+          # set, so login failed with "Password required".)
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
