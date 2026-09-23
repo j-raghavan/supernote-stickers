@@ -10,6 +10,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 
 from supernote_stickers.converter import (
+    DEFAULT_MARGIN,
     DEFAULT_STICKER_SIZE,
     DEVICES,
     SUPPORTED_EXTENSIONS,
@@ -17,6 +18,11 @@ from supernote_stickers.converter import (
 )
 
 app = Flask(__name__, template_folder="../templates")
+
+# Largest sticker edge accepted from the web endpoint.  Matches the `max`
+# attribute on the size input; enforced here because that attribute is
+# client-side only.
+MAX_STICKER_SIZE = 512
 
 # Maximum upload size: 16 MB total
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
@@ -43,23 +49,63 @@ def health():
     return jsonify({"status": "ok"})
 
 
+def _form_int(name: str, default: int) -> int:
+    """Read an integer form field, treating a missing/empty value as *default*.
+
+    Raises:
+        ValueError: If the field is present but not a valid integer.  The
+            caller turns this into a 400 so the endpoint's JSON error
+            contract holds for every bad input.
+    """
+    raw = request.form.get(name, "")
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name!r} must be an integer, got {raw!r}") from None
+
+
 @app.post("/convert")
 def convert():
     """Accept uploaded images and return an SNSTK archive.
 
     Form fields:
         files[]  – one or more image files
-        size     – max sticker dimension (optional, default 180)
-        device   – device code (optional, default "N5")
-        trim     – crop transparent borders (optional, default "true")
+        size       – longest sticker edge in px (optional, default 180)
+        device     – device code (optional, default "N5")
+        trim       – crop transparent borders (optional, default "true")
+        margin     – transparent padding per side in px (optional, default 0)
+        pad_square – centre on a square canvas (optional, default "false")
+        upscale    – scale small sources up to *size* (optional, default "true")
     """
     uploaded = request.files.getlist("files[]")
     if not uploaded:
         return jsonify({"error": "No files uploaded."}), 400
 
-    size = int(request.form.get("size", DEFAULT_STICKER_SIZE))
+    # Parse numeric fields defensively: these are untrusted input on a public
+    # endpoint, and a bad value must produce a 400 with the same JSON shape as
+    # every other input error — not an uncaught ValueError rendered as HTML.
+    try:
+        size = _form_int("size", DEFAULT_STICKER_SIZE)
+        margin = _form_int("margin", DEFAULT_MARGIN)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    # Bound the size server-side.  The HTML `max` attribute is advisory only,
+    # and conversion cost grows with the square of the canvas, so an unbounded
+    # size lets one small upload burn arbitrary CPU and memory.
+    if not 1 <= size <= MAX_STICKER_SIZE:
+        return jsonify(
+            {"error": f"'size' must be between 1 and {MAX_STICKER_SIZE}, got {size}"}
+        ), 400
+    if margin < 0:
+        return jsonify({"error": f"'margin' must be >= 0, got {margin}"}), 400
+
     device = request.form.get("device", "N5")
     trim = request.form.get("trim", "true").lower() not in ("false", "0", "no")
+    pad_square = request.form.get("pad_square", "false").lower() in ("true", "1", "yes")
+    upscale = request.form.get("upscale", "true").lower() not in ("false", "0", "no")
 
     if device not in DEVICES:
         return jsonify({"error": f"Unknown device code: {device!r}"}), 400
@@ -75,7 +121,15 @@ def convert():
         images.append((filename.stem, buf))
 
     try:
-        snstk_bytes = build_snstk(images, size=size, device=device, trim=trim)
+        snstk_bytes = build_snstk(
+            images,
+            size=size,
+            device=device,
+            trim=trim,
+            margin=margin,
+            pad_square=pad_square,
+            upscale=upscale,
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 

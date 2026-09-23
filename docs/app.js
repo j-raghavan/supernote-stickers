@@ -24,6 +24,48 @@ const AA_LEVELS = [
 
 const DEFAULT_STICKER_SIZE = 180;
 
+// Transparent breathing room added on every side, in pixels.  0 means the
+// sticker's longest edge is exactly `size` px with no padding at all.
+const DEFAULT_MARGIN = 0;
+
+/**
+ * Scale contentW x contentH so its longest edge fills `size`, preserving the
+ * aspect ratio.  `margin` is padding added later on each side, so the content
+ * is fitted into a (size - 2*margin) box and the finished sticker measures
+ * exactly `size` px on its longest edge.
+ *
+ * Unlike the previous implementation this scales UP as well as down: a 64x64
+ * source with size=180 really does produce a 180 px sticker.  Pass
+ * upscale=false to keep smaller sources at their native scale.
+ *
+ * Mirrors fit_dimensions() in converter.py.
+ */
+/**
+ * Clamp `margin` to the largest value that keeps the sticker within `size`.
+ *
+ * A margin of half the requested size or more would squeeze the artwork to
+ * nothing while the canvas kept growing as content + 2*margin, so the sticker
+ * ended up LARGER than `size` with a 1px dot inside it (size=32, margin=64
+ * produced a 129x129 sticker).  Mirrors _clamp_margin() in converter.py.
+ */
+function clampMargin(size, margin) {
+  return Math.max(0, Math.min(margin, Math.floor((size - 1) / 2)));
+}
+
+function fitDimensions(contentW, contentH, size, margin = DEFAULT_MARGIN, upscale = true) {
+  if (size < 1) throw new RangeError(`size must be >= 1, got ${size}`);
+  margin = clampMargin(size, margin);
+  const box     = Math.max(1, size - 2 * margin);
+  const longest = Math.max(contentW, contentH);
+  if (longest <= 0) return { w: 1, h: 1 };
+  let scale = box / longest;
+  if (!upscale) scale = Math.min(scale, 1);
+  return {
+    w: Math.max(1, Math.round(contentW * scale)),
+    h: Math.max(1, Math.round(contentH * scale)),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Floyd-Steinberg dithering — works directly from RGBA imageData
 // ---------------------------------------------------------------------------
@@ -154,6 +196,34 @@ const ColourMapper = {
 
 const ImageProcessor = {
   /**
+   * Detect an opaque high-contrast black-and-white image.
+   *
+   * Mirrors _is_bw_opaque_image() in converter.py: at least 90% of opaque
+   * pixels must be near-black (lum < 30) or near-white (lum > 225), and fewer
+   * than 5% of pixels may be transparent.  Such artwork must NOT be resampled
+   * with smoothing — the interpolated grays get mapped into AA_LEVELS and the
+   * crisp line art turns muddy.  Python picks Image.NEAREST for exactly this
+   * case; the browser equivalent is disabling imageSmoothingEnabled.
+   */
+  _isBwOpaque(data, width, height, bwThreshold = 0.90) {
+    const total = width * height;
+    if (total === 0) return false;
+    let transparent = 0, opaque = 0, bw = 0;
+    for (let i = 0; i < total; i++) {
+      const a = data[i * 4 + 3];
+      if (a < 10) transparent++;
+      if (a > 0) {
+        opaque++;
+        const lum = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+        if (lum < 30 || lum > 225) bw++;
+      }
+    }
+    if (transparent / total > 0.05) return false;
+    if (opaque === 0) return false;
+    return bw / opaque >= bwThreshold;
+  },
+
+  /**
    * Find the bounding box of non-transparent pixels in an RGBA ImageData.
    * Returns {sx, sy, sw, sh} or null if the image is fully transparent.
    */
@@ -174,7 +244,17 @@ const ImageProcessor = {
     return { sx: minX, sy: minY, sw: maxX - minX + 1, sh: maxY - minY + 1 };
   },
 
-  async fileToPixels(file, size = DEFAULT_STICKER_SIZE, trim = true) {
+  /**
+   * Sizing contract (mirrors image_to_pixels() in converter.py):
+   *   - the finished sticker is exactly `size` px on its longest edge;
+   *     sources smaller than `size` are scaled UP unless upscale=false
+   *   - the source aspect ratio is preserved: a 600x200 card becomes a
+   *     180x60 sticker, not a 180x180 one with dead space above and below
+   *   - `margin` adds transparent padding per side and counts toward `size`
+   *   - `padSquare` restores the legacy square-canvas behaviour
+   */
+  async fileToPixels(file, size = DEFAULT_STICKER_SIZE, trim = true,
+                     margin = DEFAULT_MARGIN, padSquare = false, upscale = true) {
     // Avoid premultiplied-alpha data loss so transparent pixels stay intact
     const bitmap = await createImageBitmap(file, { premultiplyAlpha: 'none' });
     let { width: origW, height: origH } = bitmap;
@@ -195,32 +275,38 @@ const ImageProcessor = {
       }
       // If fully transparent, keep original dimensions
     }
-    // Scale the trimmed image back to the original canvas size so the
-    // sticker matches the user's intended dimensions.  For images that
-    // were originally larger than size, cap at (size - 10) for margin.
-    const origMaxDim = Math.max(origW, origH);
-    const target = origMaxDim > size ? size - 10 : origMaxDim;
-    const scale = Math.min(target / sw, target / sh);
-    const w     = Math.max(1, Math.round(sw * scale));
-    const h     = Math.max(1, Math.round(sh * scale));
-    // Draw the (possibly trimmed) region scaled to fit within size×size
+    // Scale the (trimmed) artwork so its longest edge fills the requested
+    // size.  Scaling is driven by the CONTENT dimensions alone — the source
+    // image's own pixel dimensions no longer cap the result, which is what
+    // previously made `size` a no-op for small sources.
+    margin = clampMargin(size, margin);
+    const { w, h } = fitDimensions(sw, sh, size, margin, upscale);
+
+    // Upscaling is on by default, so small sources now go through a real
+    // resample where they used to be blitted 1:1.  Opaque B&W line art must
+    // stay crisp through that resample (converter.py uses Image.NEAREST).
+    const isBw = this._isBwOpaque(fullData.data, origW, origH);
+
     const canvas  = new OffscreenCanvas(w, h);
     const ctx     = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = !isBw;
     ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
 
-    // Centre on a size×size canvas so bitmap and trails are consistently
-    // positioned, matching the reference coordinate system the fixed
-    // digitiser offsets were calibrated against.
+    // Build the final canvas.  By default it hugs the artwork (plus any
+    // requested margin) so the imported sticker has no hidden transparent
+    // padding inflating its bounding box.  padSquare restores the legacy
+    // square canvas for callers that relied on it.
+    const canvasW = padSquare ? size : w + 2 * margin;
+    const canvasH = padSquare ? size : h + 2 * margin;
+
     let finalW = w, finalH = h;
     let finalCanvas = canvas;
-    if (w !== size || h !== size) {
-      finalCanvas = new OffscreenCanvas(size, size);
+    if (w !== canvasW || h !== canvasH) {
+      finalCanvas = new OffscreenCanvas(canvasW, canvasH);
       const fCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
-      const ox = Math.floor((size - w) / 2);
-      const oy = Math.floor((size - h) / 2);
-      fCtx.drawImage(canvas, ox, oy);
-      finalW = size;
-      finalH = size;
+      fCtx.drawImage(canvas, Math.floor((canvasW - w) / 2), Math.floor((canvasH - h) / 2));
+      finalW = canvasW;
+      finalH = canvasH;
     }
 
     const { data } = finalCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH);
@@ -828,12 +914,13 @@ function patchZipMetadata(buffer) {
 // ---------------------------------------------------------------------------
 
 const SnstkBuilder = {
-  async build(items, size, device, onProgress = () => {}, trim = true) {
+  async build(items, size, device, onProgress = () => {}, trim = true,
+              margin = DEFAULT_MARGIN, padSquare = false, upscale = true) {
     const zip = new JSZip();
 
     for (let i = 0; i < items.length; i++) {
       const { name, file } = items[i];
-      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size, trim);
+      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size, trim, margin, padSquare, upscale);
       const stickerData = await StickerBuilder.build(pixels, width, height, device, imageData);
       zip.file(`${name}.sticker`, stickerData);
       onProgress(Math.round(((i + 1) / items.length) * 100));
@@ -862,6 +949,9 @@ const UI = {
   sizeInput:   document.getElementById('size'),
   deviceInput: document.getElementById('device'),
   trimInput:   document.getElementById('trim'),
+  marginInput: document.getElementById('margin'),
+  squareInput: document.getElementById('padSquare'),
+  upscaleInput: document.getElementById('upscale'),
 
   /** @type {File[]} */
   files: [],
@@ -935,10 +1025,14 @@ const UI = {
     const size   = Math.max(32, Math.min(512, parseInt(this.sizeInput.value, 10) || DEFAULT_STICKER_SIZE));
     const device = this.deviceInput.value;
     const trim   = this.trimInput.checked;
+    const margin = clampMargin(size, parseInt(this.marginInput?.value, 10) || DEFAULT_MARGIN);
+    const padSquare = this.squareInput ? this.squareInput.checked : false;
+    const upscale   = this.upscaleInput ? this.upscaleInput.checked : true;
 
     try {
 
-      const blob = await SnstkBuilder.build(items, size, device, pct => this.setProgress(pct), trim);
+      const blob = await SnstkBuilder.build(
+        items, size, device, pct => this.setProgress(pct), trim, margin, padSquare, upscale);
       const url  = URL.createObjectURL(blob);
       const a    = Object.assign(document.createElement('a'), {
         href: url, download: 'stickers.snstk',

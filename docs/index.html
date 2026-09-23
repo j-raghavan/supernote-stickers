@@ -551,9 +551,17 @@
   <!-- Options -->
   <div class="options">
     <div class="field">
-      <label for="size">Max dimension (px)</label>
+      <label for="size">Longest edge (px)</label>
       <input type="number" id="size" value="180" min="32" max="512" step="1" />
-      <p class="hint">Stickers are scaled to fit this square.</p>
+      <p class="hint">The finished sticker is exactly this many pixels on its
+        longest side. Aspect ratio is preserved &mdash; a wide card stays wide.</p>
+    </div>
+    <div class="field">
+      <label for="margin">Margin (px per side)</label>
+      <input type="number" id="margin" value="0" min="0" max="255" step="1" />
+      <p class="hint">Transparent breathing room around the artwork, counted
+        inside the longest edge above. Leave at 0 for an exact fit. Values too
+        large for the chosen size are reduced to fit.</p>
     </div>
     <div class="field">
       <label for="device">Target device</label>
@@ -572,6 +580,25 @@
   </div>
   <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
     Removes invisible padding around the image so the sticker content fills the available space.
+  </p>
+
+  <!-- Upscale option -->
+  <div class="checkbox-field">
+    <input type="checkbox" id="upscale" checked />
+    <label for="upscale">Scale small images up to the requested size</label>
+  </div>
+  <p class="hint" style="margin-top:-.8rem; margin-bottom:1.2rem;">
+    Uncheck to leave images smaller than the longest edge at their native size.
+  </p>
+
+  <!-- Square canvas option -->
+  <div class="checkbox-field">
+    <input type="checkbox" id="padSquare" />
+    <label for="padSquare">Pad to a square canvas</label>
+  </div>
+  <p class="hint" style="margin-top:-.8rem; margin-bottom:1.5rem;">
+    Legacy behaviour: centres the artwork on a square sticker, adding
+    transparent space above/below or left/right of non-square images.
   </p>
 
   <!-- Convert button -->
