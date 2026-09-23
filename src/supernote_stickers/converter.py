@@ -7,6 +7,7 @@ used from both the CLI and the web application without modification
 
 from __future__ import annotations
 
+import math
 import random
 import struct
 import time
@@ -43,6 +44,10 @@ DEVICES: dict[str, dict] = {
 }
 
 DEFAULT_STICKER_SIZE: int = 180
+
+# Transparent breathing room added on every side, in pixels.  ``0`` means the
+# sticker's longest edge is exactly ``size`` px with no padding at all.
+DEFAULT_MARGIN: int = 0
 
 # Supported image extensions (anything Pillow can open)
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
@@ -109,10 +114,76 @@ def alpha_to_colorcode(alpha: int) -> int:
 # Image → pixel array
 # ---------------------------------------------------------------------------
 
+def _round_half_up(value: float) -> int:
+    """Round half away from zero, matching JavaScript's ``Math.round``.
+
+    Python's built-in :func:`round` uses banker's rounding, which would make
+    ``docs/app.js`` and this module disagree by one pixel whenever a scaled
+    dimension lands exactly on ``.5`` (e.g. a 8x5 source at ``size=4``).
+    Values here are always non-negative.
+    """
+    return int(math.floor(value + 0.5))
+
+
+def clamp_margin(size: int, margin: int) -> int:
+    """Clamp *margin* to the largest value that keeps the sticker within *size*.
+
+    A margin of half the requested size or more would squeeze the artwork to
+    nothing while the canvas kept growing as ``content + 2*margin``, so the
+    finished sticker ended up *larger* than *size* with a 1 px dot inside it
+    (e.g. ``size=32, margin=64`` produced a 129x129 sticker).  The largest
+    safe margin leaves at least 1 px of content: ``(size - 1) // 2``.
+    """
+    return max(0, min(margin, (size - 1) // 2))
+
+
+def fit_dimensions(
+    content_w: int,
+    content_h: int,
+    size: int,
+    margin: int = DEFAULT_MARGIN,
+    upscale: bool = True,
+) -> tuple[int, int]:
+    """Scale ``content_w`` x ``content_h`` so its longest edge fills *size*.
+
+    The aspect ratio is always preserved.  ``margin`` is transparent padding
+    added later on every side, so the *content* is fitted into a
+    ``(size - 2*margin)`` box and the finished sticker measures exactly
+    *size* px on its longest edge.
+
+    Unlike the previous implementation this scales **up** as well as down:
+    a 64x64 source with ``size=180`` really does produce a 180 px sticker.
+    Pass ``upscale=False`` to keep smaller sources at their native scale.
+
+    Returns:
+        ``(new_w, new_h)`` — the scaled content dimensions.
+
+    Raises:
+        ValueError: If *size* is less than 1.
+    """
+    if size < 1:
+        raise ValueError(f"size must be >= 1, got {size}")
+    margin = clamp_margin(size, margin)
+    box = max(1, size - 2 * margin)
+    longest = max(content_w, content_h)
+    if longest <= 0:
+        return 1, 1
+    scale = box / longest
+    if not upscale:
+        scale = min(scale, 1.0)
+    return (
+        max(1, _round_half_up(content_w * scale)),
+        max(1, _round_half_up(content_h * scale)),
+    )
+
+
 def image_to_pixels(
     source: str | Path | BinaryIO,
     size: int = DEFAULT_STICKER_SIZE,
     trim: bool = True,
+    margin: int = DEFAULT_MARGIN,
+    pad_square: bool = False,
+    upscale: bool = True,
 ) -> tuple[list[int], int, int, Image.Image, bool]:
     """Load an image and return ``(pixels, width, height, pil_image, is_bw)``.
 
@@ -125,9 +196,37 @@ def image_to_pixels(
     When *trim* is ``True`` (the default), transparent borders are
     cropped away before resizing so the visible content fills as much
     of the sticker area as possible.
+
+    Sizing contract:
+
+    * The finished sticker measures exactly *size* px on its longest
+      edge — sources smaller than *size* are scaled **up**, not left at
+      their native scale (pass ``upscale=False`` to opt out).
+    * The source aspect ratio is preserved.  A 600x200 card becomes a
+      180x60 sticker, **not** a 180x180 one with dead space above and
+      below.
+    * *margin* adds transparent breathing room on every side and is
+      included in *size*.  It defaults to ``0``, so what you ask for is
+      what the device gets.  It is clamped to ``(size - 1) // 2`` so the
+      sticker can never grow past *size*.
+    * *pad_square* restores the old behaviour of centring the artwork
+      on a square ``size`` x ``size`` canvas.
+
+    Args:
+        source: Path or file-like object for the source image.
+        size:   Length of the finished sticker's longest edge, in pixels.
+        trim:   Crop transparent borders before scaling.
+        margin: Transparent padding on each side, in pixels.
+        pad_square: Centre the artwork on a square canvas instead of
+                using the artwork's own aspect ratio.
+        upscale: Allow sources smaller than *size* to be scaled up.
+
+    Raises:
+        ValueError: If *size* is less than 1.
     """
+    if size < 1:
+        raise ValueError(f"size must be >= 1, got {size}")
     img = Image.open(source).convert("RGBA")
-    orig_max_dim = max(img.size)
 
     # Detect opaque B&W images early (before resizing) for pipeline
     # optimisation.  Only images without transparency need the special
@@ -141,19 +240,13 @@ def image_to_pixels(
             img = img.crop(bbox)
         # If bbox is None the image is fully transparent — keep as-is.
 
-    # Scale the trimmed image back to the original canvas size so the
-    # sticker matches the user's intended dimensions.  For images that
-    # were originally larger than *size*, cap at (size − 10) so there
-    # is a small margin and the content doesn't touch the edges.
-    if orig_max_dim > size:
-        target = size - 10
-    else:
-        target = orig_max_dim
-
+    # Scale the (trimmed) artwork so its longest edge fills the requested
+    # size.  Scaling is driven by the *content* dimensions alone — the
+    # source image's own pixel dimensions no longer cap the result, which
+    # is what previously made `size` a no-op for small sources.
+    margin = clamp_margin(size, margin)
     trimmed_w, trimmed_h = img.size
-    scale = min(target / trimmed_w, target / trimmed_h)
-    new_w = max(1, round(trimmed_w * scale))
-    new_h = max(1, round(trimmed_h * scale))
+    new_w, new_h = fit_dimensions(trimmed_w, trimmed_h, size, margin, upscale)
 
     # B&W images: use NEAREST resampling to preserve crisp edges.
     # LANCZOS creates anti-aliased gray pixels at black/white boundaries
@@ -162,14 +255,19 @@ def image_to_pixels(
     resample = Image.NEAREST if is_bw else Image.LANCZOS
     img = img.resize((new_w, new_h), resample)
 
-    # Centre on a size×size canvas so the bitmap and trail layers are
-    # consistently positioned, matching the reference coordinate system
-    # that the fixed digitiser offsets (15200, 200) were calibrated against.
-    if new_w != size or new_h != size:
-        canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        offset_x = (size - new_w) // 2
-        offset_y = (size - new_h) // 2
-        canvas.paste(img, (offset_x, offset_y))
+    # Build the final canvas.  By default it hugs the artwork (plus any
+    # requested margin) so the sticker the device imports has no hidden
+    # transparent padding inflating its bounding box.  ``pad_square``
+    # restores the legacy square canvas for callers that relied on it.
+    if pad_square:
+        canvas_w = canvas_h = size
+    else:
+        canvas_w = new_w + 2 * margin
+        canvas_h = new_h + 2 * margin
+
+    if (new_w, new_h) != (canvas_w, canvas_h):
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        canvas.paste(img, ((canvas_w - new_w) // 2, (canvas_h - new_h) // 2))
         img = canvas
 
     w, h = img.size
@@ -648,6 +746,31 @@ def _floyd_steinberg_dither(gray: np.ndarray) -> np.ndarray:
     return (img >= 128).astype(np.uint8) * 255
 
 
+def _erode_cross(mask: np.ndarray) -> np.ndarray:
+    """Erode a binary mask with a 3x3 cross-shaped structuring element.
+
+    Equivalent to ``cv2.erode(mask, MORPH_CROSS 3x3)`` but implemented with
+    NumPy so the package needs no OpenCV dependency.  Each pixel becomes the
+    minimum of itself and its four cardinal neighbours; out-of-bounds
+    neighbours are ignored, matching OpenCV's default border handling for
+    erosion (outside pixels treated as the maximum value).
+
+    Args:
+        mask: 2-D array where the non-zero value marks foreground.
+
+    Returns:
+        The eroded mask, same shape and dtype.
+    """
+    out = mask.copy()
+    # ``np.minimum`` is associative, so accumulating the shifted minima in
+    # place yields the true 5-point minimum.
+    out[1:, :] = np.minimum(out[1:, :], mask[:-1, :])
+    out[:-1, :] = np.minimum(out[:-1, :], mask[1:, :])
+    out[:, 1:] = np.minimum(out[:, 1:], mask[:, :-1])
+    out[:, :-1] = np.minimum(out[:, :-1], mask[:, 1:])
+    return out
+
+
 def build_trails(
     pixels: list[int],
     width: int,
@@ -738,14 +861,9 @@ def build_trails(
         # A cross-shaped 3×3 kernel (1 px erosion in cardinal directions)
         # is the lightest erosion that provides meaningful protection
         # without fragmenting thin features at 180×180 sticker scale.
-        import cv2
-        # dithered: 0=black(content), 255=white(bg)
-        # cv2.erode treats white(255) as foreground by default, so we
-        # invert: 255=content, 0=bg → erode content → invert back.
-        content_mask = (255 - dithered)
-        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        eroded = cv2.erode(content_mask, kernel, iterations=1)
-        dithered = 255 - eroded
+        # dithered: 0=black(content), 255=white(bg).  Erosion operates on
+        # the content mask (255=content), so invert → erode → invert back.
+        dithered = 255 - _erode_cross(255 - dithered)
 
     for y in range(height):
         row = dithered[y]
@@ -983,6 +1101,9 @@ def build_snstk(
     trim: bool = True,
     x_offset: float | None = None,
     y_offset: float = 0.0,
+    margin: int = DEFAULT_MARGIN,
+    pad_square: bool = False,
+    upscale: bool = True,
 ) -> bytes:
     """Build an SNSTK sticker pack and return its raw bytes.
 
@@ -991,9 +1112,16 @@ def build_snstk(
                 desired sticker name (used as the entry name inside the
                 ZIP) and *source* is anything accepted by
                 :func:`image_to_pixels`.
-        size:   Maximum sticker dimension in pixels.
+        size:   Length of each sticker's longest edge, in pixels.  Sources
+                smaller than this are scaled up so the requested size is
+                always honoured.
         device: Target device code.
         trim:   Crop transparent borders before resizing (default ``True``).
+        margin: Transparent padding on each side, in pixels (default ``0``).
+        pad_square: Centre artwork on a square canvas instead of keeping
+                its own aspect ratio (legacy behaviour, default ``False``).
+        upscale: Allow sources smaller than *size* to be scaled up
+                (default ``True``).
 
     Returns:
         Raw bytes of the ``.snstk`` archive.
@@ -1007,7 +1135,10 @@ def build_snstk(
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, source in images:
-            pixels, w, h, pil_img, is_bw = image_to_pixels(source, size, trim=trim)
+            pixels, w, h, pil_img, is_bw = image_to_pixels(
+                source, size, trim=trim, margin=margin,
+                pad_square=pad_square, upscale=upscale,
+            )
             sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img, x_offset=x_offset, y_offset=y_offset, is_bw=is_bw)
             entry_name = f"{name}.sticker"
 

@@ -13,13 +13,16 @@ from supernote_stickers.converter import (
     AA_LEVELS,
     COLORCODE_BACKGROUND,
     COLORCODE_BLACK,
+    DEFAULT_MARGIN,
     DEFAULT_STICKER_SIZE,
     DEVICES,
     SUPPORTED_EXTENSIONS,
     alpha_to_colorcode,
     build_snstk,
     build_sticker,
+    clamp_margin,
     encode_rle,
+    fit_dimensions,
     image_to_pixels,
 )
 
@@ -114,9 +117,11 @@ class TestImageToPixels:
         assert all(p == COLORCODE_BACKGROUND for p in pixels)
 
     def test_resize_respects_max_dimension(self):
+        # Exact, not `<= 50`: the old capping behaviour produced 40x20, which
+        # also satisfied `<=` and so could regress undetected.
         buf = _make_rgba_image(200, 100, (0, 0, 0, 255))
         pixels, w, h, _img, _bw = image_to_pixels(buf, size=50)
-        assert max(w, h) <= 50
+        assert (w, h) == (50, 25)
 
     def test_accepts_file_path(self, tmp_path: Path):
         img = Image.new("RGBA", (20, 20), (0, 0, 0, 255))
@@ -135,8 +140,168 @@ class TestImageToPixels:
 
 
 # ---------------------------------------------------------------------------
+# Sticker sizing contract
+# ---------------------------------------------------------------------------
+
+class TestSizingContract:
+    """The longest edge must equal the requested size, aspect preserved.
+
+    Regression cover for the reported bug where a requested size was not
+    honoured: small sources were never scaled up, and every sticker was
+    letterboxed onto a square canvas so non-square artwork arrived on the
+    device surrounded by transparent padding.
+    """
+
+    def test_longest_edge_matches_requested_size(self):
+        buf = _make_rgba_image(600, 200, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180)
+        assert max(w, h) == 180
+
+    def test_aspect_ratio_preserved_not_letterboxed(self):
+        # A 3:1 card must stay 3:1, not become a padded square.
+        buf = _make_rgba_image(600, 200, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180)
+        assert (w, h) == (180, 60)
+
+    def test_tall_image_keeps_its_aspect(self):
+        buf = _make_rgba_image(200, 600, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180)
+        assert (w, h) == (60, 180)
+
+    def test_small_source_is_scaled_up(self):
+        # Previously the source's own dimensions capped the result, making
+        # the size control a no-op for anything smaller than `size`.
+        buf = _make_rgba_image(64, 64, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180)
+        assert (w, h) == (180, 180)
+
+    def test_upscale_can_be_disabled(self):
+        buf = _make_rgba_image(64, 64, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180, upscale=False)
+        assert (w, h) == (64, 64)
+
+    def test_no_hidden_padding_by_default(self):
+        buf = _make_rgba_image(300, 300, (0, 0, 0, 255))
+        _px, w, h, img, _bw = image_to_pixels(buf, size=180)
+        # Opaque content must reach every edge — no transparent border.
+        assert img.getbbox() == (0, 0, w, h)
+
+    def test_margin_is_included_in_requested_size(self):
+        buf = _make_rgba_image(300, 300, (0, 0, 0, 255))
+        _px, w, h, img, _bw = image_to_pixels(buf, size=180, margin=10)
+        assert (w, h) == (180, 180)
+        # 10 px of transparency on each side, artwork 160x160 in the middle.
+        assert img.getbbox() == (10, 10, 170, 170)
+
+    def test_pad_square_restores_legacy_canvas(self):
+        buf = _make_rgba_image(600, 200, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180, pad_square=True)
+        assert (w, h) == (180, 180)
+
+    def test_size_is_honoured_for_every_aspect(self):
+        for src_w, src_h in [(600, 200), (200, 600), (50, 50), (1000, 1000), (7, 300)]:
+            buf = _make_rgba_image(src_w, src_h, (0, 0, 0, 255))
+            _px, w, h, _img, _bw = image_to_pixels(buf, size=200)
+            assert max(w, h) == 200, f"{src_w}x{src_h} produced {w}x{h}"
+
+
+class TestFitDimensions:
+    def test_longest_edge_fills_the_box(self):
+        assert fit_dimensions(600, 200, 180) == (180, 60)
+
+    def test_scales_up(self):
+        assert fit_dimensions(45, 15, 180) == (180, 60)
+
+    def test_margin_shrinks_the_content_box(self):
+        assert fit_dimensions(100, 100, 180, margin=10) == (160, 160)
+
+    def test_upscale_false_caps_at_native_scale(self):
+        assert fit_dimensions(45, 15, 180, upscale=False) == (45, 15)
+
+    def test_never_returns_zero(self):
+        assert fit_dimensions(2000, 3, 32) == (32, 1)
+
+    def test_rounds_half_up_like_javascript(self):
+        # Python's banker's rounding would give (4, 2) here; docs/app.js
+        # uses Math.round, so both implementations must agree on (4, 3).
+        assert fit_dimensions(8, 5, 4) == (4, 3)
+
+
+
+# ---------------------------------------------------------------------------
 # build_sticker
 # ---------------------------------------------------------------------------
+
+class TestMarginClamping:
+    """A margin must never push the sticker past the requested size.
+
+    Regression cover: `size=32, margin=64` used to floor the content box at
+    1 px while the canvas kept growing as `content + 2*margin`, yielding a
+    129x129 sticker containing a single-pixel dot.
+    """
+
+    @pytest.mark.parametrize(
+        "size,margin",
+        [(180, 89), (180, 90), (180, 200), (180, 500), (32, 64), (1, 0), (2, 5), (512, 9999)],
+    )
+    def test_sticker_never_exceeds_requested_size(self, size, margin):
+        buf = _make_rgba_image(600, 200, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=size, margin=margin)
+        assert max(w, h) <= size, f"size={size} margin={margin} gave {w}x{h}"
+
+    def test_clamp_margin_leaves_at_least_one_content_pixel(self):
+        for size in range(1, 100):
+            margin = clamp_margin(size, 10_000)
+            assert size - 2 * margin >= 1
+
+    def test_clamp_margin_passes_through_valid_values(self):
+        assert clamp_margin(180, 0) == 0
+        assert clamp_margin(180, 10) == 10
+        assert clamp_margin(180, 89) == 89
+
+    def test_clamp_margin_caps_at_half(self):
+        assert clamp_margin(180, 90) == 89
+        assert clamp_margin(32, 64) == 15
+        assert clamp_margin(1, 5) == 0
+
+    def test_negative_margin_is_treated_as_zero(self):
+        buf = _make_rgba_image(300, 300, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=180, margin=-5)
+        assert (w, h) == (180, 180)
+
+    def test_pad_square_with_margin_stays_square_and_within_size(self):
+        buf = _make_rgba_image(600, 200, (0, 0, 0, 255))
+        for margin in (0, 10, 50, 89, 200):
+            _px, w, h, img, _bw = image_to_pixels(
+                buf, size=180, margin=margin, pad_square=True
+            )
+            assert (w, h) == (180, 180), f"margin={margin}"
+            buf.seek(0)
+
+
+class TestSizeValidation:
+    """`size` below 1 must be rejected, not silently degenerate.
+
+    Previously `size=0` emitted a 0x0 sticker and `size=-5` leaked a raw
+    Pillow `ValueError` out of `Image.new`.
+    """
+
+    @pytest.mark.parametrize("size", [0, -1, -5])
+    @pytest.mark.parametrize("pad_square", [True, False])
+    def test_rejects_non_positive_size(self, size, pad_square):
+        buf = _make_rgba_image(10, 10, (0, 0, 0, 255))
+        with pytest.raises(ValueError, match="size must be >= 1"):
+            image_to_pixels(buf, size=size, pad_square=pad_square)
+
+    def test_fit_dimensions_rejects_non_positive_size(self):
+        with pytest.raises(ValueError, match="size must be >= 1"):
+            fit_dimensions(100, 100, 0)
+
+    def test_size_one_is_allowed(self):
+        buf = _make_rgba_image(10, 10, (0, 0, 0, 255))
+        _px, w, h, _img, _bw = image_to_pixels(buf, size=1)
+        assert (w, h) == (1, 1)
+
 
 class TestBuildSticker:
     def _make_sticker(self, device="N5"):
@@ -264,6 +429,10 @@ class TestBuildSnstk:
 class TestConstants:
     def test_default_size(self):
         assert DEFAULT_STICKER_SIZE == 180
+
+    def test_default_margin_is_zero(self):
+        # The default must stay 0 so `size` means exactly what it says.
+        assert DEFAULT_MARGIN == 0
 
     def test_supported_extensions_includes_png(self):
         assert ".png" in SUPPORTED_EXTENSIONS
