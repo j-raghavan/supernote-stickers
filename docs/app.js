@@ -22,6 +22,30 @@ const AA_LEVELS = [
   0x8F, 0x9F, 0xAF, 0xBF, 0xCF, 0xDF, 0xEF,
 ];
 
+// A placed sticker is drawn from its trail strokes, not from its bitmap, so
+// the strokes alone must carry the image's tone.  The firmware draws strokes
+// in the same pen colours as the plugin SDK (sn-plugin-lib Element.penColor).
+const PEN_COLOR_BLACK      = 0x00;
+const PEN_COLOR_DARK_GRAY  = 0x9D;
+const PEN_COLOR_LIGHT_GRAY = 0xC9;
+
+// Thinnest pen weight the firmware accepts.  Each 1 px scanline stroke is
+// drawn ~2.3 px wide at this weight, so neighbouring rows overlap.
+const STROKE_PEN_WEIGHT = 200;
+
+// Tones a placed sticker can show, darkest first (mirrors TONE_PALETTE in
+// converter.py): rendered grey, stroke pen colour (null = paper), bitmap code.
+// The greys are what an A6X2 Nomad puts on screen for each pen colour; the
+// bitmap codes are the AA levels with matching ink, so the picker thumbnail
+// shows the same four tones the strokes will draw.
+const TONE_PALETTE = [
+  { tone: 0,   pen: PEN_COLOR_BLACK,      code: COLORCODE_BLACK },
+  { tone: 157, pen: PEN_COLOR_DARK_GRAY,  code: 0x9F },
+  { tone: 201, pen: PEN_COLOR_LIGHT_GRAY, code: 0xBF },
+  { tone: 255, pen: null,                 code: COLORCODE_BACKGROUND },
+];
+const TONE_PAPER = TONE_PALETTE.length - 1;
+
 const DEFAULT_STICKER_SIZE = 180;
 
 // Transparent breathing room added on every side, in pixels.  0 means the
@@ -133,12 +157,6 @@ function floydSteinbergDither(gray) {
   return _ditherCore(img);
 }
 
-function floydSteinbergDitherFromRGBA(imageData, width, height) {
-  const gray = rgbaToGrayscale(imageData, width, height);
-  const img = enhanceContrast(gray);
-  return _ditherCore(img, width, height);
-}
-
 function _ditherCore(img, width, height) {
   if (!width) { width = Math.round(Math.sqrt(img.length)); height = width; }
 
@@ -168,6 +186,62 @@ function _ditherCore(img, width, height) {
     mask[i] = img[i] < 128 ? 255 : 0;
   }
   return mask;
+}
+
+// ---------------------------------------------------------------------------
+// Four-tone quantisation — mirrors quantize_tones() in converter.py
+// ---------------------------------------------------------------------------
+
+/**
+ * Floyd-Steinberg error diffusion onto the TONE_PALETTE greys.
+ * Transparent pixels (opaque[i] false) are always paper and neither take nor
+ * pass on diffusion error, so ink never spills past the artwork.
+ * Returns a Uint8Array of TONE_PALETTE indices.
+ */
+function quantizeGray(gray, opaque, width, height) {
+  const img   = Float64Array.from(gray);   // error is diffused in place
+  const tones = TONE_PALETTE.map(t => t.tone);
+  // Midpoints between neighbouring tones: a value below cuts[i] rounds to
+  // tone i or darker.
+  const cuts  = tones.slice(1).map((t, i) => (tones[i] + t) / 2);
+  const out   = new Uint8Array(width * height).fill(TONE_PAPER);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (!opaque[idx]) continue;
+      const oldVal = img[idx];
+      let t = 0;
+      while (t < cuts.length && oldVal >= cuts[t]) t++;
+      out[idx] = t;
+      const err = oldVal - tones[t];
+
+      if (x + 1 < width && opaque[idx + 1])
+        img[idx + 1] += err * 7 / 16;
+      if (y + 1 < height) {
+        const below = idx + width;
+        if (x - 1 >= 0 && opaque[below - 1])
+          img[below - 1] += err * 3 / 16;
+        if (opaque[below])
+          img[below] += err * 5 / 16;
+        if (x + 1 < width && opaque[below + 1])
+          img[below + 1] += err * 1 / 16;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Reduce RGBA imageData to the four tones a placed sticker can show.
+ * Both the bitmap and the trail strokes are built from this one result, so
+ * the picker thumbnail and the placed sticker agree.
+ */
+function quantizeTones(imageData, width, height) {
+  const gray   = rgbaToGrayscale(imageData, width, height);
+  const opaque = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) opaque[i] = imageData[i * 4 + 3] > 0 ? 1 : 0;
+  return quantizeGray(gray, opaque, width, height);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,16 +386,23 @@ const ImageProcessor = {
     const { data } = finalCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, finalW, finalH);
     const pixels   = new Uint8Array(finalW * finalH);
 
-    for (let i = 0; i < finalW * finalH; i++) {
-      const r = data[i * 4];
-      const g = data[i * 4 + 1];
-      const b = data[i * 4 + 2];
-      const a = data[i * 4 + 3];
-      pixels[i] = ColourMapper.rgbaToColorcode(r, g, b, a);
+    if (isBw) {
+      for (let i = 0; i < finalW * finalH; i++) {
+        const r = data[i * 4];
+        const g = data[i * 4 + 1];
+        const b = data[i * 4 + 2];
+        const a = data[i * 4 + 3];
+        pixels[i] = ColourMapper.rgbaToColorcode(r, g, b, a);
+      }
+    } else {
+      // The bitmap shows the same four tones the strokes will draw, so the
+      // picker thumbnail matches the sticker once it is placed in a note.
+      const tones = quantizeTones(data, finalW, finalH);
+      for (let i = 0; i < tones.length; i++) pixels[i] = TONE_PALETTE[tones[i]].code;
     }
 
     bitmap.close();
-    return { pixels, width: finalW, height: finalH, imageData: data };
+    return { pixels, width: finalW, height: finalH, imageData: data, isBw };
   },
 };
 
@@ -424,10 +505,13 @@ function hexToBytes(hex) {
 // Stroke record binary constants (mirrors converter.py)
 // ---------------------------------------------------------------------------
 
+// emr is the pen digitizer's [width, height] in its own units — the same two
+// values stored in each stroke's device-info block.  It covers the screen at
+// 8.45 digitizer units per pixel.  Mirrors DEVICES in converter.py.
 const DEVICES = {
-  N5:  { screen: [1920, 2560] },
-  A5X: { screen: [1404, 1872] },
-  A6X: { screen: [1404, 1872] },
+  N5:  { screen: [1920, 2560], emr: [16224, 21632] },
+  A5X: { screen: [1404, 1872], emr: [11864, 15819] },
+  A6X: { screen: [1404, 1872], emr: [11864, 15819] },
 };
 
 
@@ -545,21 +629,26 @@ const TrailsBuilder = {
    * @param {string} device    Device code
    * @param {number} screenW   Screen width
    * @param {number} screenH   Screen height
+   * @param {number} penColor  Stroke pen colour, one of the PEN_COLOR_* constants
    * @returns {Uint8Array}  Stroke data bytes
    */
-  _buildStroke(contourPts, strokeNb, device, screenW, screenH, stickerWidth = 180, xOffset = null, yOffset = 10) {
+  _buildStroke(contourPts, strokeNb, device, screenW, screenH, penColor = PEN_COLOR_BLACK) {
     // Dense vector points for pen trajectory (firmware needs many points)
     const vectorPts = this._interpolateContour(contourPts, 2.0);
     const nVec = vectorPts.length;
     // Simplified contour points for shape outline
     const nContour = contourPts.length;
 
-    // Two coordinate spaces (verified against official christmas2025.snstk):
+    // Two coordinate spaces:
     //   bbox / contour  → sticker pixel coordinates (0..width/height)
-    //   vector points   → pen digitizer coordinates (scaled + offset)
-    const VEC_SCALE = 8.0;
-    const VEC_OFFSET_X = 15200;
-    const VEC_OFFSET_Y = 200;
+    //   vector points   → pen digitizer coordinates
+    // Fitted over all 4,613 strokes of the official christmas2025.snstk:
+    //   digiX = emrWidth - px * scale,   digiY = py * scale
+    // with scale = emrWidth / screenW (8.45 on every known device).  The
+    // firmware draws the sticker from the vector points but places the
+    // selection box from bbox/contour, so both must describe the same pixels.
+    const emrW  = (this.DEVICES[device] || this.DEVICES.N5).emr[0];
+    const scale = emrW / screenW;
 
     // Bounding box in PIXEL space (NOT digitizer space).
     // The firmware uses these values for sticker placement/hit-testing.
@@ -581,8 +670,8 @@ const TrailsBuilder = {
 
     // ---- Stroke header (20 bytes) ----
     buf.push(10, 0, 0, 0);       // pen_type=10 + padding
-    buf.push(0, 0, 0, 0);        // pen_color=0 + padding
-    packU16LE(buf, 220);          // pen_weight=220
+    buf.push(penColor, 0, 0, 0); // pen_color (PEN_COLOR_*) + padding
+    packU16LE(buf, STROKE_PEN_WEIGHT);
     buf.push(...hexToBytes('00000A00000000000000'));   // 10 fixed bytes
 
     // ---- Record body ----
@@ -606,15 +695,10 @@ const TrailsBuilder = {
     buf.push(..._FLAGS);
 
     // ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
-    // X-mirroring + centering offsets applied here only (not in contour/bbox)
-    // because the firmware horizontally flips rendered vector strokes.
-    // Empirically-determined offsets align the rendered strokes with the bitmap.
-    const _xOff = xOffset !== null ? xOffset : stickerWidth / 4;
     packU32LE(buf, nVec);
     for (const [x, y] of vectorPts) {
-      const mirroredX = (stickerWidth - 1) - x - _xOff;
-      const digiX = Math.round(mirroredX * VEC_SCALE + VEC_OFFSET_X);
-      const digiY = Math.round((y - yOffset) * VEC_SCALE + VEC_OFFSET_Y);
+      const digiX = Math.round(emrW - x * scale);
+      const digiY = Math.round(y * scale);
       packI32LE(buf, digiY);   // y stored first
       packI32LE(buf, digiX);   // x stored second
     }
@@ -657,33 +741,59 @@ const TrailsBuilder = {
   },
 
   /**
-   * Build trails using Floyd-Steinberg dithering + scanline fills.
+   * Build trails as scanline strokes in four tones (mirrors build_trails()).
+   *
+   * A placed sticker is drawn from these strokes, not from its bitmap.  The
+   * image is reduced to black, dark grey, light grey and paper, and every
+   * horizontal run of one tone becomes a stroke in the matching pen colour.
+   * Grey pens keep mid-tones grey even though neighbouring ~2.3 px-wide
+   * strokes overlap; with black dots alone that overlap turned every
+   * mid-tone solid black.  Strokes are emitted row by row, top to bottom, so
+   * each row paints over the overlap from the row above and every tone
+   * spreads by the same amount (emitting black last made stickers darker).
+   *
+   * Opaque B&W line art (isBw) keeps black strokes only.
    *
    * @param {Uint8Array} pixels   Row-major Supernote colour codes (for bitmap)
    * @param {number}     width    Sticker width
    * @param {number}     height   Sticker height
    * @param {string}     device   Device code
-   * @param {Uint8ClampedArray} imageData  Raw RGBA pixel data for dithering
+   * @param {Uint8ClampedArray} imageData  Raw RGBA pixel data
+   * @param {boolean}    isBw     Source is high-contrast B&W line art
    * @returns {Uint8Array}
    */
-  build(pixels, width, height, device = 'N5', imageData = null) {
+  build(pixels, width, height, device = 'N5', imageData = null, isBw = false) {
     const [screenW, screenH] = (this.DEVICES[device] || this.DEVICES.N5).screen;
 
-    // Dither directly from RGBA data (full 256-level grayscale precision)
-    let ditheredMask;
+    // Grayscale from RGBA data when available, else recovered from the
+    // bitmap colour codes (the TONE_PALETTE codes map back exactly).
+    let gray;
     if (imageData) {
-      ditheredMask = floydSteinbergDitherFromRGBA(imageData, width, height);
+      gray = rgbaToGrayscale(imageData, width, height);
     } else {
-      const gray = new Float64Array(width * height);
+      gray = new Float64Array(width * height);
       const codeToGray = new Map([[COLORCODE_BLACK, 0], [COLORCODE_BACKGROUND, 255]]);
       for (let i = 0; i < AA_LEVELS.length; i++)
         codeToGray.set(AA_LEVELS[i], Math.round((i + 1) / (AA_LEVELS.length + 1) * 255));
+      for (const { tone, code } of TONE_PALETTE) codeToGray.set(code, tone);
       for (let i = 0; i < pixels.length; i++)
         gray[i] = codeToGray.get(pixels[i]) ?? 255;
-      ditheredMask = _ditherCore(enhanceContrast(gray), width, height);
     }
 
-    // Scanline fill strokes from dithered image
+    // TONE_PALETTE index per pixel; paper pixels get no stroke.
+    let tones;
+    if (isBw) {
+      const ditheredMask = _ditherCore(enhanceContrast(gray), width, height);
+      tones = ditheredMask.map(m => (m ? 0 : TONE_PAPER));
+    } else {
+      const opaque = new Uint8Array(width * height);
+      for (let i = 0; i < width * height; i++)
+        opaque[i] = imageData ? (imageData[i * 4 + 3] > 0 ? 1 : 0)
+                              : (pixels[i] !== COLORCODE_BACKGROUND ? 1 : 0);
+      tones = quantizeGray(gray, opaque, width, height);
+    }
+
+    // Scanline fill strokes, row by row
     const strokeChunks = [];
     let strokeNb = 1004;
     let numStrokes = 0;
@@ -702,11 +812,11 @@ const TrailsBuilder = {
     for (let y = 0; y < height; y++) {
       let x = 0;
       while (x < width) {
-        if (ditheredMask[y * width + x] === 0) { x++; continue; }  // white, skip
+        const tone = tones[y * width + x];
+        if (tone === TONE_PAPER) { x++; continue; }  // no ink, skip
         const xStart = x;
-        while (x < width && ditheredMask[y * width + x] !== 0) x++;  // black run
+        while (x < width && tones[y * width + x] === tone) x++;  // run of one tone
         const xEnd = x - 1;
-        if (xEnd < xStart) continue;
         // Rectangle in ORIGINAL pixel space (matching the bitmap).
         // X-mirroring is applied in _buildStroke's vector encoding only.
         const runPts = [
@@ -715,14 +825,14 @@ const TrailsBuilder = {
           [xEnd,   y + 1],
           [xStart, y + 1],
         ];
-        wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH, width));
+        wrapStroke(this._buildStroke(runPts, strokeNb, device, screenW, screenH, TONE_PALETTE[tone].pen));
       }
     }
 
     // Fallback if no strokes at all
     if (numStrokes === 0) {
       const fallbackPts = [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]];
-      wrapStroke(this._buildStroke(fallbackPts, 1004, device, screenW, screenH, width));
+      wrapStroke(this._buildStroke(fallbackPts, 1004, device, screenW, screenH));
     }
 
     // TOTALPATH: assemble strokes_count + all stroke chunks
@@ -761,7 +871,7 @@ const StickerBuilder = {
     arr.push(val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >>> 24) & 0xFF);
   },
 
-  async build(pixels, width, height, device = 'N5', imageData = null) {
+  async build(pixels, width, height, device = 'N5', imageData = null, isBw = false) {
     const fileId = this._generateFileId();
 
     // --- Section 1 – header ---
@@ -789,9 +899,9 @@ const StickerBuilder = {
     new DataView(bitmapBlock.buffer).setUint32(0, rle.length, true);
     bitmapBlock.set(rle instanceof Uint8Array ? rle : new Uint8Array(rle), 4);
 
-    // --- Section 3 – trails (Floyd-Steinberg dithered) ---
+    // --- Section 3 – trails (four-tone scanline strokes) ---
     const trailsOffset = bitmapOffset + bitmapBlock.length;
-    const trailsData   = TrailsBuilder.build(pixels, width, height, device, imageData);
+    const trailsData   = TrailsBuilder.build(pixels, width, height, device, imageData, isBw);
     const trailsBlock  = new Uint8Array(4 + trailsData.length);
     new DataView(trailsBlock.buffer).setUint32(0, trailsData.length, true);
     trailsBlock.set(trailsData, 4);
@@ -920,8 +1030,8 @@ const SnstkBuilder = {
 
     for (let i = 0; i < items.length; i++) {
       const { name, file } = items[i];
-      const { pixels, width, height, imageData } = await ImageProcessor.fileToPixels(file, size, trim, margin, padSquare, upscale);
-      const stickerData = await StickerBuilder.build(pixels, width, height, device, imageData);
+      const { pixels, width, height, imageData, isBw } = await ImageProcessor.fileToPixels(file, size, trim, margin, padSquare, upscale);
+      const stickerData = await StickerBuilder.build(pixels, width, height, device, imageData, isBw);
       zip.file(`${name}.sticker`, stickerData);
       onProgress(Math.round(((i + 1) / items.length) * 100));
     }

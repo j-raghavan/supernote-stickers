@@ -16,14 +16,22 @@ from supernote_stickers.converter import (
     DEFAULT_MARGIN,
     DEFAULT_STICKER_SIZE,
     DEVICES,
+    PEN_COLOR_BLACK,
+    PEN_COLOR_DARK_GRAY,
+    PEN_COLOR_LIGHT_GRAY,
+    STROKE_PEN_WEIGHT,
     SUPPORTED_EXTENSIONS,
+    TONE_PALETTE,
+    TONE_PAPER,
     alpha_to_colorcode,
     build_snstk,
     build_sticker,
+    build_trails,
     clamp_margin,
     encode_rle,
     fit_dimensions,
     image_to_pixels,
+    quantize_tones,
 )
 
 # ---------------------------------------------------------------------------
@@ -327,6 +335,143 @@ class TestBuildSticker:
 
     def test_returns_bytes(self):
         assert isinstance(self._make_sticker(), bytes)
+
+
+# ---------------------------------------------------------------------------
+# Four-tone strokes
+# ---------------------------------------------------------------------------
+
+def _parse_strokes(trails: bytes) -> list[tuple[int, int, int, int, int]]:
+    """Return ``(pen_color, pen_weight, x_start, x_end, y)`` per stroke."""
+    import struct
+
+    count = struct.unpack_from("<I", trails, 0)[0]
+    pos, strokes = 4, []
+    for _ in range(count):
+        length = struct.unpack_from("<I", trails, pos)[0]
+        data = trails[pos + 4:pos + 4 + length]
+        weight = struct.unpack_from("<H", data, 8)[0]
+        min_x, min_y, _ax, _ay, max_x, _my = struct.unpack_from("<6i", data, 100)
+        strokes.append((data[4], weight, min_x, max_x, min_y))
+        pos += 4 + length
+    return strokes
+
+
+def _gray_ramp(width: int = 64, height: int = 16) -> Image.Image:
+    """Opaque horizontal ramp from black to white (not B&W line art)."""
+    row = [round(255 * x / (width - 1)) for x in range(width)]
+    img = Image.new("RGBA", (width, height))
+    img.putdata([(v, v, v, 255) for _y in range(height) for v in row])
+    return img
+
+
+class TestQuantizeTones:
+    @pytest.mark.parametrize("index", range(len(TONE_PALETTE)))
+    def test_flat_palette_tone_maps_to_itself(self, index):
+        tone = TONE_PALETTE[index][0]
+        img = Image.new("RGBA", (8, 8), (tone, tone, tone, 255))
+        assert (quantize_tones(img) == index).all()
+
+    def test_mid_grey_mixes_neighbouring_tones(self):
+        # 180 sits between dark grey (157) and light grey (201): error
+        # diffusion must mix exactly those two, never black or paper.
+        img = Image.new("RGBA", (16, 16), (180, 180, 180, 255))
+        assert set(quantize_tones(img).ravel()) == {1, 2}
+
+    def test_average_tone_tracks_source(self):
+        tones = [t[0] for t in TONE_PALETTE]
+        for value in (40, 120, 180, 230):
+            img = Image.new("RGBA", (32, 32), (value, value, value, 255))
+            rendered = sum(tones[i] for i in quantize_tones(img).ravel()) / (32 * 32)
+            assert abs(rendered - value) < 6
+
+    def test_transparent_pixels_never_get_ink(self):
+        img = Image.new("RGBA", (16, 16), (128, 128, 128, 255))
+        for x in range(16):
+            for y in range(8):
+                img.putpixel((x, y), (0, 0, 0, 0))
+        tones = quantize_tones(img)
+        assert (tones[:8] == TONE_PAPER).all()
+        assert (tones[8:] != TONE_PAPER).any()
+
+
+class TestFourToneStrokes:
+    def test_strokes_use_native_pens_at_minimum_weight(self):
+        img = _gray_ramp()
+        strokes = _parse_strokes(build_trails([], 64, 16, pil_image=img))
+        assert {s[0] for s in strokes} == {
+            PEN_COLOR_BLACK, PEN_COLOR_DARK_GRAY, PEN_COLOR_LIGHT_GRAY,
+        }
+        assert {s[1] for s in strokes} == {STROKE_PEN_WEIGHT}
+        assert STROKE_PEN_WEIGHT >= 200
+
+    def test_strokes_are_emitted_row_by_row(self):
+        # Grouping strokes by colour (e.g. all black last) lets one tone
+        # spread over its neighbours on the device and darkens the sticker;
+        # row-major order spreads every tone evenly.
+        img = _gray_ramp()
+        strokes = _parse_strokes(build_trails([], 64, 16, pil_image=img))
+        positions = [(y, x0) for _pen, _w, x0, _x1, y in strokes]
+        assert positions == sorted(positions)
+        first_row = [s[0] for s in strokes if s[4] == 0]
+        assert len(set(first_row)) == 3   # tones interleave within a row
+
+    def test_bitmap_and_strokes_show_the_same_tones(self):
+        buf = BytesIO()
+        _gray_ramp(48, 12).save(buf, format="PNG")
+        buf.seek(0)
+        pixels, w, h, img, is_bw = image_to_pixels(buf, size=48)
+        assert not is_bw
+        code_to_index = {code: i for i, (_t, _p, code) in enumerate(TONE_PALETTE)}
+        assert set(pixels) <= set(code_to_index)
+
+        pen_to_index = {pen: i for i, (_t, pen, _c) in enumerate(TONE_PALETTE) if pen is not None}
+        drawn = [TONE_PAPER] * (w * h)
+        for pen, _weight, x0, x1, y in _parse_strokes(build_trails(pixels, w, h, pil_image=img)):
+            for x in range(x0, x1 + 1):
+                drawn[y * w + x] = pen_to_index[pen]
+        assert drawn == [code_to_index[c] for c in pixels]
+
+    def test_bitmap_codes_round_trip_without_source_image(self):
+        buf = BytesIO()
+        _gray_ramp(48, 12).save(buf, format="PNG")
+        buf.seek(0)
+        pixels, w, h, img, _bw = image_to_pixels(buf, size=48)
+        assert build_trails(pixels, w, h) == build_trails(pixels, w, h, pil_image=img)
+
+    @pytest.mark.parametrize("device", sorted(DEVICES))
+    def test_pen_points_land_inside_their_bbox_on_non_square_sticker(self, device):
+        # The firmware draws vector points but places the lasso box from the
+        # bbox; a width-dependent offset once drew 109 px-wide art ~45 px to
+        # the right of its selection box.
+        import struct
+
+        img = _gray_ramp(109, 30)
+        trails = build_trails([], 109, 30, device=device, pil_image=img)
+        emr_w = DEVICES[device]["emr"][0]
+        scale = emr_w / DEVICES[device]["screen"][0]
+        pos = 4
+        for _ in range(struct.unpack_from("<I", trails, 0)[0]):
+            length = struct.unpack_from("<I", trails, pos)[0]
+            data = trails[pos + 4:pos + 4 + length]
+            min_x, min_y, _ax, _ay, max_x, max_y = struct.unpack_from("<6i", data, 100)
+            n = struct.unpack_from("<I", data, 212)[0]
+            pts = struct.unpack_from(f"<{2 * n}i", data, 216)
+            xs = [(emr_w - dx) / scale for dx in pts[1::2]]
+            ys = [dy / scale for dy in pts[0::2]]
+            assert min_x - 0.5 <= min(xs) and max(xs) <= max_x + 0.5
+            assert min_y - 0.5 <= min(ys) and max(ys) <= max_y + 0.5
+            pos += 4 + length
+
+    def test_line_art_keeps_black_strokes_only(self):
+        img = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+        for x in range(20):
+            img.putpixel((x, 10), (0, 0, 0, 255))
+            img.putpixel((x, 11), (0, 0, 0, 255))
+            img.putpixel((x, 12), (0, 0, 0, 255))
+        strokes = _parse_strokes(build_trails([], 20, 20, pil_image=img, is_bw=True))
+        assert {s[0] for s in strokes} == {PEN_COLOR_BLACK}
+        assert {s[1] for s in strokes} == {STROKE_PEN_WEIGHT}
 
 
 # ---------------------------------------------------------------------------
