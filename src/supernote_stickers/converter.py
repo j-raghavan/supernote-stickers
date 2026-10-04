@@ -34,13 +34,44 @@ AA_LEVELS: list[int] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Stroke pens
+# ---------------------------------------------------------------------------
+# A placed sticker is drawn from its trail strokes, not from its bitmap, so
+# the strokes alone must carry the image's tone.  The firmware draws strokes
+# in the same pen colours as the plugin SDK (sn-plugin-lib Element.penColor).
+PEN_COLOR_BLACK: int = 0x00
+PEN_COLOR_DARK_GRAY: int = 0x9D
+PEN_COLOR_LIGHT_GRAY: int = 0xC9
+
+# Thinnest pen weight the firmware accepts.  Each 1 px scanline stroke is
+# drawn ~2.3 px wide at this weight, so neighbouring rows overlap.
+STROKE_PEN_WEIGHT: int = 200
+
+# Tones a placed sticker can show, darkest first:
+#   (rendered grey, stroke pen colour or None for paper, bitmap colour code)
+# The greys are what an A6X2 Nomad actually puts on screen for each pen
+# colour (measured from a screencap).  The bitmap codes are the AA levels
+# whose ink amount matches those greys, so the picker thumbnail shows the
+# same four tones the strokes will draw.
+TONE_PALETTE: tuple[tuple[int, int | None, int], ...] = (
+    (0,   PEN_COLOR_BLACK,      COLORCODE_BLACK),
+    (157, PEN_COLOR_DARK_GRAY,  0x9F),
+    (201, PEN_COLOR_LIGHT_GRAY, 0xBF),
+    (255, None,                 COLORCODE_BACKGROUND),
+)
+TONE_PAPER: int = len(TONE_PALETTE) - 1
+
+# ---------------------------------------------------------------------------
 # Known devices
 # ---------------------------------------------------------------------------
 
+# ``emr`` is the pen digitizer's (width, height) in its own units — the same
+# two values stored in each stroke's device-info block.  It covers the screen
+# at 8.45 digitizer units per pixel.
 DEVICES: dict[str, dict] = {
-    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560)},
-    "A5X": {"name": "A5X",                      "screen": (1404, 1872)},
-    "A6X": {"name": "A6X",                      "screen": (1404, 1872)},
+    "N5":  {"name": "A5X2 Manta / A6X2 Nomad", "screen": (1920, 2560), "emr": (16224, 21632)},
+    "A5X": {"name": "A5X",                      "screen": (1404, 1872), "emr": (11864, 15819)},
+    "A6X": {"name": "A6X",                      "screen": (1404, 1872), "emr": (11864, 15819)},
 }
 
 DEFAULT_STICKER_SIZE: int = 180
@@ -272,6 +303,13 @@ def image_to_pixels(
 
     w, h = img.size
 
+    if not is_bw:
+        # The bitmap shows the same four tones the strokes will draw, so the
+        # picker thumbnail matches the sticker once it is placed in a note.
+        tones = quantize_tones(img)
+        pixels = [TONE_PALETTE[t][2] for t in tones.ravel()]
+        return pixels, w, h, img, is_bw
+
     pixels: list[int] = []
     for y in range(h):
         for x in range(w):
@@ -496,9 +534,9 @@ def _build_stroke(
     device: str,
     screen_w: int,
     screen_h: int,
-    sticker_width: int = 180,
     _x_offset: float = 0.0,
     _y_offset: float = 0.0,
+    pen_color: int = PEN_COLOR_BLACK,
 ) -> bytes:
     """Build a single stroke record from contour points.
 
@@ -510,9 +548,9 @@ def _build_stroke(
     samples along the contour (mimicking a real pen trajectory), while the
     **contours** section stores the original simplified polygon vertices.
 
-    Contour/bbox stay in original pixel space (matching the bitmap) while
-    vector points are X-mirrored to counteract the firmware's horizontal
-    flip during trail rendering.
+    Contour/bbox stay in sticker pixel space (matching the bitmap) while
+    vector points are in pen-digitizer space, whose x axis runs opposite to
+    the screen's (see the vector-points section below).
 
     Args:
         contour_points: List of (x, y) float coordinates in pixel space.
@@ -520,7 +558,9 @@ def _build_stroke(
         device: Device code key from :data:`DEVICES`.
         screen_w: Screen width for the target device.
         screen_h: Screen height for the target device.
-        sticker_width: Sticker width in pixels (for X-mirroring vectors).
+        _x_offset: Extra horizontal shift of the drawn stroke, in pixels.
+        _y_offset: Extra vertical shift of the drawn stroke, in pixels.
+        pen_color: Stroke pen colour, one of the ``PEN_COLOR_*`` constants.
 
     Returns:
         Complete stroke_data bytes (stroke header + record body).
@@ -538,11 +578,15 @@ def _build_stroke(
     # ---- Coordinate spaces ----
     # The Supernote firmware uses TWO coordinate systems in each stroke:
     #   bbox / contour  → sticker pixel coordinates (0..width/height)
-    #   vector points   → pen digitizer coordinates (scaled + offset)
-    # Verified against official christmas2025.snstk Christmas Dog sticker.
-    _VEC_SCALE = 8.0
-    _VEC_OFFSET_X = 15200
-    _VEC_OFFSET_Y = 200
+    #   vector points   → pen digitizer coordinates
+    # Fitted over all 4,613 strokes of the official christmas2025.snstk:
+    #   digi_x = emr_width - px * scale,   digi_y = py * scale
+    # with scale = emr_width / screen_width (8.45 on every known device).
+    # The firmware draws the sticker from the vector points but places the
+    # selection box from bbox/contour, so the two must describe the same
+    # pixels or the art drifts away from its lasso box.
+    emr_w = DEVICES.get(device, DEVICES["N5"])["emr"][0]
+    scale = emr_w / screen_w
 
     # Bounding box in PIXEL space (NOT digitizer space).
     # The firmware uses these values for sticker placement/hit-testing.
@@ -560,9 +604,9 @@ def _build_stroke(
     # ---- Stroke header (20 bytes) ----
     buf += struct.pack('B', 10)           # pen_type = 10 (standard)
     buf += b'\x00\x00\x00'
-    buf += struct.pack('B', 0)            # pen_color = 0 (black)
+    buf += struct.pack('B', pen_color)    # pen_color (PEN_COLOR_*)
     buf += b'\x00\x00\x00'
-    buf += struct.pack('<H', 220)         # pen_weight = 220
+    buf += struct.pack('<H', STROKE_PEN_WEIGHT)
     buf += bytes.fromhex('00000A00000000000000')   # 10 fixed bytes
 
     # ---- Record body ----
@@ -589,15 +633,10 @@ def _build_stroke(
     buf += _FLAGS
 
     # ---- Vector points (y, x as i32 pairs) — digitizer coordinates ----
-    # X-mirroring is applied HERE (not in contour/bbox) because the
-    # firmware horizontally flips rendered vector strokes.  Mirroring
-    # the vector coordinates counteracts this so the visual output
-    # matches the un-mirrored bitmap layer.
     buf += _p(n_vec)
     for x, y in vector_pts:
-        mirrored_x = (sticker_width - 1) - x - _x_offset
-        digi_x = int(mirrored_x * _VEC_SCALE + _VEC_OFFSET_X)
-        digi_y = int((y - _y_offset) * _VEC_SCALE + _VEC_OFFSET_Y)
+        digi_x = _round_half_up(emr_w - (x + _x_offset) * scale)
+        digi_y = _round_half_up((y + _y_offset) * scale)
         buf += _ps(digi_y)   # y stored first
         buf += _ps(digi_x)   # x stored second
 
@@ -645,7 +684,7 @@ def _build_stroke(
 
 
 # ---------------------------------------------------------------------------
-# Trails builder (Floyd-Steinberg dithering + OpenCV contours)
+# Trails builder (four-tone error diffusion + scanline fills)
 # ---------------------------------------------------------------------------
 
 
@@ -675,11 +714,15 @@ def _pixels_to_grayscale(
 ) -> np.ndarray:
     """Convert Supernote colour codes to a grayscale image (0=black, 255=white).
 
-    Fallback for when the original PIL image isn't available.
+    Fallback for when the original PIL image isn't available.  The four
+    :data:`TONE_PALETTE` codes map back to their exact greys, so a bitmap
+    built by :func:`quantize_tones` round-trips to the same tones.
     """
     code_to_gray: dict[int, int] = {COLORCODE_BLACK: 0, COLORCODE_BACKGROUND: 255}
     for idx, code in enumerate(AA_LEVELS):
         code_to_gray[code] = int((idx + 1) / (len(AA_LEVELS) + 1) * 255)
+    for tone, _pen, code in TONE_PALETTE:
+        code_to_gray[code] = tone
 
     gray = np.full((height, width), 255, dtype=np.float64)
     for i, code in enumerate(pixels):
@@ -687,63 +730,60 @@ def _pixels_to_grayscale(
     return gray
 
 
-def _enhance_contrast(gray: np.ndarray) -> np.ndarray:
-    """Stretch contrast and apply gamma correction for better dithering.
+def _quantize_gray(gray: np.ndarray, opaque: np.ndarray) -> np.ndarray:
+    """Floyd-Steinberg error diffusion onto the :data:`TONE_PALETTE` greys.
 
-    1. Contrast stretch: remap [min, max] of non-white pixels to [0, 255].
-    2. Gamma correction (γ=0.6): darken midtones so that light skin tones
-       and subtle features produce enough black dots after dithering.
+    Args:
+        gray:   float grayscale image (0=black, 255=white).
+        opaque: bool mask of pixels that may receive ink.  Transparent
+                pixels are always paper and neither take nor pass on
+                diffusion error, so ink never spills past the artwork.
+
+    Returns:
+        ``uint8`` array of :data:`TONE_PALETTE` indices, same shape.
     """
-    # Find the value range of non-white pixels (actual content)
-    content_mask = gray < 250
-    if not content_mask.any():
-        return gray
-    lo = float(gray[content_mask].min())
-    hi = float(gray[content_mask].max())
-    if hi - lo < 1:
-        return gray
+    h, w = gray.shape
+    img = gray.astype(np.float64)   # astype copies; error is diffused in place
+    tones = [t[0] for t in TONE_PALETTE]
+    # Midpoints between neighbouring tones: a value below cuts[i] rounds to
+    # tone i or darker.
+    cuts = [(a + b) / 2 for a, b in zip(tones, tones[1:])]
+    out = np.full((h, w), TONE_PAPER, dtype=np.uint8)
 
-    # Contrast stretch
-    out = gray.copy()
-    out[content_mask] = (gray[content_mask] - lo) / (hi - lo) * 255.0
-    out = np.clip(out, 0, 255)
+    for y in range(h):
+        for x in range(w):
+            if not opaque[y, x]:
+                continue
+            old_val = img[y, x]
+            idx = 0
+            while idx < len(cuts) and old_val >= cuts[idx]:
+                idx += 1
+            out[y, x] = idx
+            err = old_val - tones[idx]
 
-    # Gamma correction (< 1 darkens midtones, 0.4 = aggressive)
-    out[content_mask] = 255.0 * (out[content_mask] / 255.0) ** 0.4
+            if x + 1 < w and opaque[y, x + 1]:
+                img[y, x + 1] += err * 7.0 / 16.0
+            if y + 1 < h:
+                if x - 1 >= 0 and opaque[y + 1, x - 1]:
+                    img[y + 1, x - 1] += err * 3.0 / 16.0
+                if opaque[y + 1, x]:
+                    img[y + 1, x] += err * 5.0 / 16.0
+                if x + 1 < w and opaque[y + 1, x + 1]:
+                    img[y + 1, x + 1] += err * 1.0 / 16.0
 
     return out
 
 
-def _floyd_steinberg_dither(gray: np.ndarray) -> np.ndarray:
-    """Apply Floyd-Steinberg error-diffusion dithering.
+def quantize_tones(img: Image.Image) -> np.ndarray:
+    """Reduce an RGBA image to the four tones a placed sticker can show.
 
-    Takes a float64 grayscale image (0=black, 255=white) and returns a
-    uint8 binary image (0 or 255) that, when viewed at a distance,
-    approximates the original tonal gradation.
+    Returns a ``(height, width)`` ``uint8`` array of :data:`TONE_PALETTE`
+    indices.  Both the bitmap and the trail strokes are built from this
+    one result, so the picker thumbnail and the placed sticker agree.
     """
-    h, w = gray.shape
-    img = _enhance_contrast(gray)
-
-    for y in range(h):
-        for x in range(w):
-            old_val = img[y, x]
-            new_val = 0.0 if old_val < 128 else 255.0
-            img[y, x] = new_val
-            err = old_val - new_val
-
-            if x + 1 < w:
-                img[y, x + 1] += err * 7.0 / 16.0
-            if y + 1 < h:
-                if x - 1 >= 0:
-                    img[y + 1, x - 1] += err * 3.0 / 16.0
-                img[y + 1, x] += err * 5.0 / 16.0
-                if x + 1 < w:
-                    img[y + 1, x + 1] += err * 1.0 / 16.0
-
-    # Standard grayscale convention: 0 = black, 255 = white.
-    # After the quantisation loop every pixel is exactly 0.0 or 255.0,
-    # so this simply converts float64 → uint8 while preserving the values.
-    return (img >= 128).astype(np.uint8) * 255
+    gray = _rgba_image_to_grayscale(img)
+    opaque = np.array(img.convert("RGBA"))[:, :, 3] > 0
+    return _quantize_gray(gray, opaque)
 
 
 def _erode_cross(mask: np.ndarray) -> np.ndarray:
@@ -771,6 +811,26 @@ def _erode_cross(mask: np.ndarray) -> np.ndarray:
     return out
 
 
+def _row_runs(row: np.ndarray) -> list[tuple[int, int, int]]:
+    """Return ``(x_start, x_end, tone)`` for each run of one inked tone.
+
+    *row* holds :data:`TONE_PALETTE` indices; paper pixels start no run.
+    """
+    runs: list[tuple[int, int, int]] = []
+    width = len(row)
+    x = 0
+    while x < width:
+        tone = int(row[x])
+        if tone == TONE_PAPER:
+            x += 1
+            continue
+        x_start = x
+        while x < width and row[x] == tone:
+            x += 1
+        runs.append((x_start, x - 1, tone))
+    return runs
+
+
 def build_trails(
     pixels: list[int],
     width: int,
@@ -781,29 +841,35 @@ def build_trails(
     y_offset: float = 0.0,
     is_bw: bool = False,
 ) -> bytes:
-    """Build the trails section using scanline fills on dithered bitmap.
+    """Build the trails section as scanline strokes in four tones.
 
-    Converts the grayscale pixel data to a black-and-white halftone using
-    Floyd-Steinberg error-diffusion dithering, then creates strokes by
-    finding solid horizontal runs of black pixels (scanline fill approach).
-    Each row of the dithered image produces one or more strokes for its
-    black pixel runs, creating a proper newspaper-style halftone pattern.
+    A placed sticker is drawn from these strokes, not from its bitmap.
+    The image is reduced to black, dark grey, light grey and paper with
+    :func:`quantize_tones`, and every horizontal run of one tone becomes a
+    stroke in the matching pen colour.  Grey pens keep mid-tones grey even
+    though neighbouring ~2.3 px-wide strokes overlap; with black dots alone
+    that overlap turned every mid-tone solid black.
 
-    When *pil_image* is provided, dithering works directly from the full
-    256-level RGBA data instead of the lossy 17-level colour codes.
+    Strokes are emitted row by row, top to bottom.  Each row then paints
+    over the overlap from the row above, so every tone spreads by the same
+    amount.  Emitting all black strokes last instead lets black spread over
+    its neighbours in both directions and visibly darkens the sticker
+    (measured on an A6X2 Nomad: black coverage rose from 42 % to ~60 %).
+
+    When *pil_image* is provided, tones come from the full 256-level RGBA
+    data; otherwise they are recovered from the bitmap colour codes.
 
     When *is_bw* is ``True``, the image is treated as high-contrast
-    black-and-white line art.  Dithering is replaced by a simple
-    luminance threshold, and only every 3rd row is scanned for strokes.
-    This prevents the trail layer's pen strokes from bleeding into and
-    covering fine white detail areas on the e-ink display.
+    black-and-white line art: a luminance threshold and a light erosion
+    produce black strokes only, so pen width cannot swallow fine white
+    detail on the e-ink display.
 
     Args:
         pixels: Supernote colour codes (row-major, length = *width* × *height*).
         width:  Sticker width in pixels.
         height: Sticker height in pixels.
         device: Device code key from :data:`DEVICES`.
-        pil_image: Optional PIL RGBA image for high-quality dithering.
+        pil_image: Optional PIL RGBA image for full-precision tones.
         is_bw: Whether the source image is high-contrast B&W line art.
 
     Returns:
@@ -813,6 +879,7 @@ def build_trails(
     _pack_u32 = struct.Struct("<I").pack
     screen_w, screen_h = DEVICES.get(device, DEVICES["N5"])["screen"]
 
+    # TONE_PALETTE index per pixel; paper pixels get no stroke.
     if is_bw:
         # B&W line art: use a simple luminance threshold instead of
         # dithering.  Dithering adds noise dots at edges that, combined
@@ -822,63 +889,33 @@ def build_trails(
             gray = _rgba_image_to_grayscale(pil_image)
         else:
             gray = _pixels_to_grayscale(pixels, width, height)
-        # Simple threshold: < 128 → black (0), >= 128 → white (255)
-        dithered = np.where(gray < 128, 0, 255).astype(np.uint8)
+        # Erode the black mask before generating scanline fills.  Each pen
+        # stroke bleeds on the e-ink display; erosion shrinks the black
+        # regions inward so the bleed expands back toward the original
+        # boundary without overflowing into the white details.  A
+        # cross-shaped 3×3 kernel is the lightest erosion that protects
+        # detail without fragmenting thin features at sticker scale.
+        black = _erode_cross((gray < 128).astype(np.uint8) * 255) == 255
+        tones = np.where(black, 0, TONE_PAPER)
     else:
-        # Dither from full RGBA data when available (much higher quality)
         if pil_image is not None:
-            gray = _rgba_image_to_grayscale(pil_image)
+            tones = quantize_tones(pil_image)
         else:
             gray = _pixels_to_grayscale(pixels, width, height)
-        dithered = _floyd_steinberg_dither(gray)
+            opaque = (np.array(pixels) != COLORCODE_BACKGROUND).reshape(height, width)
+            tones = _quantize_gray(gray, opaque)
 
-    # Generate scanline fill strokes from dithered mask.
-    # dithered is uint8 with standard grayscale convention:
-    #   0   = black (content)  → generate strokes
-    #   255 = white (background) → skip
-
-    # Centering offsets for vector mirroring.
-    # The firmware's trail renderer introduces a positional shift;
-    # these empirically-determined offsets compensate so the rendered
-    # strokes align with the bitmap layer.
+    # Optional extra shift of the drawn strokes, in pixels.  Not needed for
+    # alignment: the digitizer mapping in _build_stroke already places
+    # every stroke on the pixels its bbox describes.
     if x_offset is None:
-        x_offset = width / 4   # ≈ 45 px for 180-wide stickers
-    if y_offset == 0.0:
-        y_offset = 10.0
+        x_offset = 0.0
 
     all_strokes = bytearray()
     stroke_nb = 1004
 
-    if is_bw:
-        # B&W line art: erode the black mask before generating scanline
-        # fills.  The SuperNote renders trails as the primary visual
-        # layer, and each pen stroke bleeds on the e-ink display.
-        # Erosion shrinks the black regions inward, creating a buffer
-        # zone around white detail areas.  When the pen bleeds outward
-        # during rendering, the strokes expand back toward the original
-        # boundary without overflowing into the white details.
-        #
-        # A cross-shaped 3×3 kernel (1 px erosion in cardinal directions)
-        # is the lightest erosion that provides meaningful protection
-        # without fragmenting thin features at 180×180 sticker scale.
-        # dithered: 0=black(content), 255=white(bg).  Erosion operates on
-        # the content mask (255=content), so invert → erode → invert back.
-        dithered = 255 - _erode_cross(255 - dithered)
-
     for y in range(height):
-        row = dithered[y]
-        x = 0
-        while x < width:
-            if row[x] == 255:  # white/background pixel, skip
-                x += 1
-                continue
-            x_start = x
-            while x < width and row[x] == 0:  # black/content pixel
-                x += 1
-            x_end = x - 1
-            if x_end - x_start < 0:
-                continue
-
+        for x_start, x_end, tone in _row_runs(tones[y]):
             # Create rectangle points for this run in ORIGINAL pixel space.
             # Contour/bbox must match the bitmap positions so the selection
             # box aligns with the visible content.  X-mirroring (needed
@@ -891,7 +928,11 @@ def build_trails(
                 (float(x_start), float(y + 1)),
             ]
 
-            stroke_data = _build_stroke(run_pts, stroke_nb, device, screen_w, screen_h, sticker_width=width, _x_offset=x_offset, _y_offset=y_offset)
+            stroke_data = _build_stroke(
+                run_pts, stroke_nb, device, screen_w, screen_h,
+                _x_offset=x_offset, _y_offset=y_offset,
+                pen_color=TONE_PALETTE[tone][1],
+            )
             all_strokes += _pack_u32(len(stroke_data))
             all_strokes += stroke_data
             stroke_nb += 1
@@ -904,7 +945,7 @@ def build_trails(
             (float(width - 1), float(height - 1)), (0.0, float(height - 1)),
         ]
         stroke_data = _build_stroke(
-            fallback_pts, 1004, device, screen_w, screen_h, sticker_width=width, _x_offset=x_offset, _y_offset=y_offset,
+            fallback_pts, 1004, device, screen_w, screen_h, _x_offset=x_offset, _y_offset=y_offset,
         )
         all_strokes = bytearray(_pack_u32(len(stroke_data))) + bytearray(stroke_data)
         num_strokes = 1
@@ -980,7 +1021,10 @@ def build_sticker(
 
     # Section 3 – trails (required for sticker insertion)
     trails_offset = bitmap_offset + len(bitmap_block)
-    trails_data = build_trails(pixels, width, height, device, pil_image=pil_image, x_offset=x_offset, y_offset=y_offset, is_bw=is_bw)
+    trails_data = build_trails(
+        pixels, width, height, device, pil_image=pil_image,
+        x_offset=x_offset, y_offset=y_offset, is_bw=is_bw,
+    )
     trails_block = struct.pack("<I", len(trails_data)) + trails_data
 
     # Section 4 – sticker rect
@@ -1139,7 +1183,10 @@ def build_snstk(
                 source, size, trim=trim, margin=margin,
                 pad_square=pad_square, upscale=upscale,
             )
-            sticker_data = build_sticker(pixels, w, h, device, pil_image=pil_img, x_offset=x_offset, y_offset=y_offset, is_bw=is_bw)
+            sticker_data = build_sticker(
+                pixels, w, h, device, pil_image=pil_img,
+                x_offset=x_offset, y_offset=y_offset, is_bw=is_bw,
+            )
             entry_name = f"{name}.sticker"
 
             info = zipfile.ZipInfo(entry_name)

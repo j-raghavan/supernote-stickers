@@ -153,7 +153,8 @@ def run() -> None:
     # Get external port for logging purposes (if different from internal)
     external_port = os.environ.get("PORT", internal_port)
     if int(external_port) != internal_port:
-        print(f"\n⚠️  WARNING: This is a development server. Do not use it in production deployment.\n"
+        print("\n⚠️  WARNING: This is a development server. "
+              "Do not use it in production deployment.\n"
               f"   Container listening on: {internal_port}\n"
               f"   Access from host on: {external_port}\n", file=sys.stderr)
     
